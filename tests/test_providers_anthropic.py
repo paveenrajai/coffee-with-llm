@@ -1,0 +1,161 @@
+"""Tests for Anthropic provider."""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from ask_llm.exceptions import ConfigurationError
+from ask_llm.providers.anthropic import AnthropicMessagesClient
+from ask_llm.providers.anthropic.messages_client import _convert_tools_to_anthropic
+
+
+class TestAnthropicMessagesClientInitialization:
+    """Tests for AnthropicMessagesClient initialization."""
+
+    def test_init_without_api_key(self):
+        """Test that missing API key raises ConfigurationError."""
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(ConfigurationError, match="ANTHROPIC_API_KEY"):
+                AnthropicMessagesClient()
+
+    def test_init_with_api_key(self):
+        """Test successful initialization with API key."""
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("anthropic.AsyncAnthropic"):
+                client = AnthropicMessagesClient()
+                assert client._api_key == "test-key"
+
+    def test_init_with_missing_anthropic_package(self):
+        """Test that missing Anthropic package raises ConfigurationError."""
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            import builtins
+            original_import = builtins.__import__
+
+            def mock_import(name, *args, **kwargs):
+                if name == "anthropic":
+                    raise ImportError("No module named 'anthropic'")
+                return original_import(name, *args, **kwargs)
+
+            with patch("builtins.__import__", side_effect=mock_import):
+                with pytest.raises(ConfigurationError, match="Anthropic package not installed"):
+                    AnthropicMessagesClient()
+
+
+class TestConvertToolsToAnthropic:
+    """Tests for _convert_tools_to_anthropic."""
+
+    def test_convert_openai_style_function(self):
+        """Test converting OpenAI-style function tool."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                },
+            }
+        ]
+        result = _convert_tools_to_anthropic(tools)
+        assert len(result) == 1
+        assert result[0]["name"] == "get_weather"
+        assert result[0]["description"] == "Get weather"
+        assert result[0]["input_schema"]["type"] == "object"
+        assert "location" in result[0]["input_schema"]["properties"]
+
+    def test_convert_already_anthropic_format(self):
+        """Test passing through already-Anthropic format."""
+        tools = [
+            {
+                "name": "get_time",
+                "description": "Get time",
+                "input_schema": {"type": "object", "properties": {"tz": {"type": "string"}}},
+            }
+        ]
+        result = _convert_tools_to_anthropic(tools)
+        assert len(result) == 1
+        assert result[0]["name"] == "get_time"
+        assert result[0]["input_schema"]["type"] == "object"
+
+    def test_convert_empty_list(self):
+        """Test empty tools list."""
+        assert _convert_tools_to_anthropic([]) == []
+
+
+class TestAnthropicMessagesClientNormalizeToolResult:
+    """Tests for _normalize_tool_result method."""
+
+    def test_normalize_with_ok_attribute(self):
+        """Test normalization with object having ok attribute."""
+        mock_result = MagicMock()
+        mock_result.ok = True
+        mock_result.result = {"data": "test"}
+        mock_result.error = None
+
+        normalized = AnthropicMessagesClient._normalize_tool_result(mock_result)
+        assert normalized == {"ok": True, "result": {"data": "test"}, "error": None}
+
+    def test_normalize_with_dict(self):
+        """Test normalization with dict."""
+        result_dict = {"ok": True, "result": {"data": "test"}, "error": None}
+        normalized = AnthropicMessagesClient._normalize_tool_result(result_dict)
+        assert normalized == result_dict
+
+    def test_normalize_with_invalid_input(self):
+        """Test normalization with invalid input."""
+        normalized = AnthropicMessagesClient._normalize_tool_result("invalid")
+        assert normalized == {"ok": False, "result": {}, "error": None}
+
+
+class TestAnthropicMessagesClientGenerate:
+    """Tests for generate method."""
+
+    @pytest.mark.asyncio
+    async def test_generate_basic(self):
+        """Test basic generation."""
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("anthropic.AsyncAnthropic") as mock_anthropic:
+                mock_client = MagicMock()
+                mock_response = MagicMock()
+                mock_response.content = [{"type": "text", "text": "Test response"}]
+                mock_response.stop_reason = "end_turn"
+
+                async def mock_create(*args, **kwargs):
+                    return mock_response
+
+                mock_client.messages.create = mock_create
+                mock_anthropic.return_value = mock_client
+
+                client = AnthropicMessagesClient()
+                result = await client.generate(
+                    prompt="What is Python?", model="claude-sonnet-4-6"
+                )
+                assert result == "Test response"
+
+    @pytest.mark.asyncio
+    async def test_generate_with_system_instruction(self):
+        """Test generation with system instruction."""
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch("anthropic.AsyncAnthropic") as mock_anthropic:
+                mock_client = MagicMock()
+                mock_response = MagicMock()
+                mock_response.content = [{"type": "text", "text": "Hello"}]
+                mock_response.stop_reason = "end_turn"
+
+                async def mock_create(*args, **kwargs):
+                    assert kwargs.get("system") == "You are helpful."
+                    return mock_response
+
+                mock_client.messages.create = mock_create
+                mock_anthropic.return_value = mock_client
+
+                client = AnthropicMessagesClient()
+                result = await client.generate(
+                    prompt="Hi",
+                    model="claude-sonnet-4-6",
+                    instructions="You are helpful.",
+                )
+                assert result == "Hello"

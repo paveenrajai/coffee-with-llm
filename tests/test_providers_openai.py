@@ -1,0 +1,184 @@
+"""Tests for OpenAI provider."""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from ask_llm.exceptions import ConfigurationError
+from ask_llm.providers.openai import OpenAIResponsesClient
+
+
+class TestOpenAIResponsesClientInitialization:
+    """Tests for OpenAIResponsesClient initialization."""
+
+    def test_init_without_api_key(self):
+        """Test that missing API key raises ConfigurationError."""
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(ConfigurationError, match="OPENAI_API_KEY"):
+                OpenAIResponsesClient()
+
+    def test_init_with_api_key(self):
+        """Test successful initialization with API key."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}):
+            with patch("openai.AsyncOpenAI"):
+                client = OpenAIResponsesClient()
+                assert client._api_key == "test-key"
+
+    def test_init_with_missing_openai_package(self):
+        """Test that missing OpenAI package raises ConfigurationError."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}):
+            # Mock the import to raise ImportError
+            import builtins
+            original_import = builtins.__import__
+            
+            def mock_import(name, *args, **kwargs):
+                if name == "openai":
+                    raise ImportError("No module named 'openai'")
+                return original_import(name, *args, **kwargs)
+            
+            with patch("builtins.__import__", side_effect=mock_import):
+                with pytest.raises(ConfigurationError, match="OpenAI package not installed"):
+                    OpenAIResponsesClient()
+
+
+class TestOpenAIResponsesClientNormalizeToolResult:
+    """Tests for _normalize_tool_result method."""
+
+    def test_normalize_with_ok_attribute(self):
+        """Test normalization with object having ok attribute."""
+        mock_result = MagicMock()
+        mock_result.ok = True
+        mock_result.result = {"data": "test"}
+        mock_result.error = None
+
+        normalized = OpenAIResponsesClient._normalize_tool_result(mock_result)
+        assert normalized == {"ok": True, "result": {"data": "test"}, "error": None}
+
+    def test_normalize_with_dict(self):
+        """Test normalization with dict."""
+        result_dict = {"ok": True, "result": {"data": "test"}, "error": None}
+        normalized = OpenAIResponsesClient._normalize_tool_result(result_dict)
+        assert normalized == result_dict
+
+    def test_normalize_with_invalid_input(self):
+        """Test normalization with invalid input."""
+        normalized = OpenAIResponsesClient._normalize_tool_result("invalid")
+        assert normalized == {"ok": False, "result": {}, "error": None}
+
+
+class TestOpenAIResponsesClientParseResponseFormat:
+    """Tests for _parse_response_format method."""
+
+    def test_parse_none(self):
+        """Test parsing None."""
+        result = OpenAIResponsesClient._parse_response_format(None)
+        assert result is None
+
+    def test_parse_json_schema_dict(self):
+        """Test parsing JSON schema dict."""
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }
+        result = OpenAIResponsesClient._parse_response_format(response_format)
+        assert result is not None
+        assert "format" in result
+
+    def test_parse_json_string(self):
+        """Test parsing JSON string."""
+        result = OpenAIResponsesClient._parse_response_format("json")
+        assert result is not None
+        assert result["format"]["type"] == "json_object"
+
+    def test_parse_markdown_string(self):
+        """Test parsing markdown string."""
+        result = OpenAIResponsesClient._parse_response_format("markdown")
+        assert result is not None
+        assert result["format"]["type"] == "markdown"
+
+    def test_parse_text_string(self):
+        """Test parsing text string."""
+        result = OpenAIResponsesClient._parse_response_format("text")
+        assert result is not None
+        assert result["format"]["type"] == "text"
+
+
+class TestOpenAIResponsesClientGenerate:
+    """Tests for generate method."""
+
+    @pytest.mark.asyncio
+    async def test_generate_basic(self):
+        """Test basic generation."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}):
+            with patch("openai.AsyncOpenAI") as mock_openai:
+                mock_client_instance = MagicMock()
+                mock_response = MagicMock()
+                mock_response.output_text = "Test response"
+                mock_response.usage = MagicMock()
+                mock_response.usage.cached_tokens = 0
+                mock_response.usage.prompt_tokens = 10
+                mock_response.required_action = None
+
+                async def mock_create(*args, **kwargs):
+                    return mock_response
+
+                mock_client_instance.responses.create = mock_create
+                mock_openai.return_value = mock_client_instance
+
+                client = OpenAIResponsesClient()
+                result = await client.generate(
+                    prompt="What is Python?", model="gpt-4o-mini"
+                )
+                assert result == "Test response"
+
+    @pytest.mark.asyncio
+    async def test_generate_with_instructions(self):
+        """Test generation with instructions."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}):
+            with patch("openai.AsyncOpenAI") as mock_openai:
+                mock_client_instance = MagicMock()
+                mock_response = MagicMock()
+                mock_response.output_text = "Test response"
+                mock_response.usage = MagicMock()
+                mock_response.usage.cached_tokens = 0
+                mock_response.usage.prompt_tokens = 10
+                mock_response.required_action = None
+
+                async def mock_create(*args, **kwargs):
+                    return mock_response
+
+                mock_client_instance.responses.create = mock_create
+                mock_openai.return_value = mock_client_instance
+
+                client = OpenAIResponsesClient()
+                result = await client.generate(
+                    prompt="What is Python?",
+                    model="gpt-4o-mini",
+                    instructions="You are a helpful assistant.",
+                )
+                assert result == "Test response"
+
+    @pytest.mark.asyncio
+    async def test_generate_with_max_tokens(self):
+        """Test generation with max_tokens."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}):
+            with patch("openai.AsyncOpenAI") as mock_openai:
+                mock_client_instance = MagicMock()
+                mock_response = MagicMock()
+                mock_response.output_text = "Test response"
+                mock_response.usage = MagicMock()
+                mock_response.usage.cached_tokens = 0
+                mock_response.usage.prompt_tokens = 10
+                mock_response.required_action = None
+
+                async def mock_create(*args, **kwargs):
+                    return mock_response
+
+                mock_client_instance.responses.create = mock_create
+                mock_openai.return_value = mock_client_instance
+
+                client = OpenAIResponsesClient()
+                result = await client.generate(
+                    prompt="What is Python?", model="gpt-4o-mini", max_tokens=100
+                )
+                assert result == "Test response"
+
