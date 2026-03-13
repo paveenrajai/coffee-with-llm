@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from coffee import AskLLM, TokenUsage
-from coffee.exceptions import APIError, ConfigurationError, ValidationError
+from coffee_with_llm import AskLLM, TokenUsage
+from coffee_with_llm.exceptions import APIError, ConfigurationError, ValidationError
 
 
 class TestAskLLMInitialization:
@@ -28,13 +28,13 @@ class TestAskLLMInitialization:
 
     def test_init_with_gemini_model(self, mock_google_api_key):
         """Test initialization with Gemini model."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             llm = AskLLM(model="gemini-2.0-flash-exp")
             assert llm._model == "gemini-2.0-flash-exp"
 
     def test_init_with_google_prefix(self, mock_google_api_key):
         """Test initialization with 'google' prefix."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             llm = AskLLM(model="google-gemini-pro")
             assert llm._model == "google-gemini-pro"
 
@@ -176,7 +176,7 @@ class TestAskLLMAskMethod:
     @pytest.mark.asyncio
     async def test_ask_with_google_success(self, mock_google_api_key):
         """Test successful Google API call."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             llm = AskLLM(model="gemini-2.0-flash-exp")
             mock_client_instance = MagicMock()
             mock_client_instance.generate = AsyncMock(return_value="Test response")

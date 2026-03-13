@@ -5,11 +5,11 @@ import sys
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from coffee import Config
-from coffee.exceptions import ConfigurationError
-from coffee.providers.anthropic import AnthropicMessagesClient
-from coffee.providers.anthropic.messages_client import _convert_tools_to_anthropic
-from coffee.providers.tool_utils import normalize_tool_result
+from coffee_with_llm import Config
+from coffee_with_llm.exceptions import ConfigurationError
+from coffee_with_llm.providers.anthropic import AnthropicMessagesClient
+from coffee_with_llm.providers.anthropic.messages_client import _convert_tools_to_anthropic
+from coffee_with_llm.providers.tool_utils import normalize_tool_result
 
 
 def _config(anthropic_api_key="test-key"):

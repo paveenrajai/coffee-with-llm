@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch
 
-from coffee import AskLLM, TokenUsage
+from coffee_with_llm import AskLLM, TokenUsage
 
 
 class TestStreamRetry:

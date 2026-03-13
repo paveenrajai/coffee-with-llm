@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock
 
-from coffee.providers.tool_utils import (
+from coffee_with_llm.providers.tool_utils import (
     extract_error_code,
     normalize_tool_result,
     should_break_loop,

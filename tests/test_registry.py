@@ -5,12 +5,12 @@ import sys
 import pytest
 from unittest.mock import MagicMock, patch
 
-from coffee import Config
-from coffee.providers.registry import get_provider
-from coffee.providers.protocol import ProviderProtocol
-from coffee.providers.anthropic import AnthropicMessagesClient
-from coffee.providers.google import GoogleTextClient
-from coffee.providers.openai import OpenAIResponsesClient
+from coffee_with_llm import Config
+from coffee_with_llm.providers.registry import get_provider
+from coffee_with_llm.providers.protocol import ProviderProtocol
+from coffee_with_llm.providers.anthropic import AnthropicMessagesClient
+from coffee_with_llm.providers.google import GoogleTextClient
+from coffee_with_llm.providers.openai import OpenAIResponsesClient
 
 
 def _config():
@@ -38,14 +38,14 @@ class TestGetProvider:
     def test_gemini_model_returns_google_client(self):
         """gemini-* returns GoogleTextClient."""
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test"}):
-            with patch("coffee.providers.google.text_client.genai.Client"):
+            with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
                 client = get_provider("gemini-2.0-flash", _config())
                 assert isinstance(client, GoogleTextClient)
 
     def test_google_prefix_returns_google_client(self):
         """google-* returns GoogleTextClient."""
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test"}):
-            with patch("coffee.providers.google.text_client.genai.Client"):
+            with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
                 client = get_provider("google-gemini-pro", _config())
                 assert isinstance(client, GoogleTextClient)
 

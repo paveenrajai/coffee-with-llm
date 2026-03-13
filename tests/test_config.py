@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import patch
 
-from coffee import Config
-from coffee.exceptions import ConfigurationError
+from coffee_with_llm import Config
+from coffee_with_llm.exceptions import ConfigurationError
 
 
 class TestConfigFromEnv:

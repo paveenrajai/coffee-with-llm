@@ -3,10 +3,10 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from coffee import Config
-from coffee.exceptions import ConfigurationError
-from coffee.providers.google import GoogleTextClient
-from coffee.providers.google.text_client import (
+from coffee_with_llm import Config
+from coffee_with_llm.exceptions import ConfigurationError
+from coffee_with_llm.providers.google import GoogleTextClient
+from coffee_with_llm.providers.google.text_client import (
     _convert_tools_to_gemini,
     _inline_json_schema_refs,
 )
@@ -27,14 +27,14 @@ class TestGoogleTextClientInitialization:
 
     def test_init_with_api_key(self):
         """Test successful initialization with API key."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             assert client._cached_contexts is not None
 
     def test_init_with_missing_google_package(self):
         """Test that missing Google package raises ConfigurationError."""
         with patch(
-            "coffee.providers.google.text_client.genai.Client",
+            "coffee_with_llm.providers.google.text_client.genai.Client",
             side_effect=ImportError("No module named 'google.genai'"),
         ):
             with pytest.raises(ConfigurationError, match="Google GenAI package not installed"):
@@ -46,7 +46,7 @@ class TestGoogleTextClientBuildConfigDict:
 
     def test_build_config_basic(self):
         """Test building basic config dict."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             config = client._build_config_dict()
             assert "tools" in config
@@ -54,28 +54,28 @@ class TestGoogleTextClientBuildConfigDict:
 
     def test_build_config_with_max_tokens(self):
         """Test building config with max_tokens."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             config = client._build_config_dict(max_tokens=100)
             assert config["max_output_tokens"] == 100
 
     def test_build_config_with_temperature(self):
         """Test building config with temperature."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             config = client._build_config_dict(temperature=0.7)
             assert config["temperature"] == 0.7
 
     def test_build_config_with_top_p(self):
         """Test building config with top_p."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             config = client._build_config_dict(top_p=0.9)
             assert config["top_p"] == 0.9
 
     def test_build_config_with_json_schema(self):
         """Test building config with JSON schema."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             response_format = {
                 "type": "json_schema",
@@ -88,7 +88,7 @@ class TestGoogleTextClientBuildConfigDict:
 
     def test_build_config_without_tools_for_json(self):
         """Test that tools are not included for JSON schema responses."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             response_format = {
                 "type": "json_schema",
@@ -99,7 +99,7 @@ class TestGoogleTextClientBuildConfigDict:
 
     def test_build_config_with_tools_schema(self):
         """Test that tools_schema adds function_declarations instead of google_search."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             tools = [
                 {
@@ -121,7 +121,7 @@ class TestGoogleTextClientBuildConfigDict:
 
     def test_build_config_without_google_search_for_streaming(self):
         """include_google_search=False omits tools (for streaming)."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             config = client._build_config_dict(include_google_search=False)
             assert "tools" not in config
@@ -220,7 +220,7 @@ class TestGoogleTextClientGetSystemPromptHash:
 
     def test_hash_generation(self):
         """Test hash generation for system prompt."""
-        with patch("coffee.providers.google.text_client.genai.Client"):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
             hash1 = client._get_system_prompt_hash("test prompt")
             hash2 = client._get_system_prompt_hash("test prompt")
@@ -236,7 +236,7 @@ class TestGoogleTextClientGenerate:
     @pytest.mark.asyncio
     async def test_generate_basic(self):
         """Test basic generation."""
-        with patch("coffee.providers.google.text_client.genai.Client") as mock_genai:
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client") as mock_genai:
             mock_client_instance = MagicMock()
             mock_aio = MagicMock()
             mock_models = MagicMock()
@@ -266,7 +266,7 @@ class TestGoogleTextClientGenerate:
     @pytest.mark.asyncio
     async def test_generate_with_system_instruct(self):
         """Test generation with system instruction."""
-        with patch("coffee.providers.google.text_client.genai.Client") as mock_genai:
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client") as mock_genai:
             mock_client_instance = MagicMock()
             mock_aio = MagicMock()
             mock_models = MagicMock()
@@ -296,7 +296,7 @@ class TestGoogleTextClientGenerate:
     @pytest.mark.asyncio
     async def test_generate_with_max_tokens(self):
         """Test generation with max_tokens."""
-        with patch("coffee.providers.google.text_client.genai.Client") as mock_genai:
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client") as mock_genai:
             mock_client_instance = MagicMock()
             mock_aio = MagicMock()
             mock_models = MagicMock()

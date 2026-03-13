@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock
 
-from coffee.providers.google.utils.citations import (
+from coffee_with_llm.providers.google.utils.citations import (
     collect_grounding_urls,
     extract_citations,
     inject_inline_citations,

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from coffee.rate_limit import (
+from coffee_with_llm.rate_limit import (
     RATE_LIMIT_BACKOFF_BASE,
     is_rate_limit_error,
     retry_stream,
@@ -88,7 +88,7 @@ class TestRetryStream:
 
     @pytest.mark.asyncio
     async def test_yields_all_items(self):
-        from coffee.types import TokenUsage
+        from coffee_with_llm.types import TokenUsage
 
         async def stream():
             yield "a"
@@ -103,7 +103,7 @@ class TestRetryStream:
 
     @pytest.mark.asyncio
     async def test_retries_on_rate_limit(self):
-        from coffee.types import TokenUsage
+        from coffee_with_llm.types import TokenUsage
 
         call_count = 0
 

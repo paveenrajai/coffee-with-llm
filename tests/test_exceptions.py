@@ -2,7 +2,7 @@
 
 import pytest
 
-from coffee.exceptions import (
+from coffee_with_llm.exceptions import (
     APIError,
     AskLLMError,
     ConfigurationError,

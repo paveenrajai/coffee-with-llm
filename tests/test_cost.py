@@ -2,8 +2,8 @@
 
 import pytest
 
-from coffee.cost import estimate_cost
-from coffee.types import TokenUsage
+from coffee_with_llm.cost import estimate_cost
+from coffee_with_llm.types import TokenUsage
 
 
 class TestEstimateCost:

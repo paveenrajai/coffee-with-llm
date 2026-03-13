@@ -3,10 +3,10 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from coffee import Config
-from coffee.exceptions import ConfigurationError
-from coffee.providers.openai import OpenAIResponsesClient
-from coffee.providers.tool_utils import normalize_tool_result
+from coffee_with_llm import Config
+from coffee_with_llm.exceptions import ConfigurationError
+from coffee_with_llm.providers.openai import OpenAIResponsesClient
+from coffee_with_llm.providers.tool_utils import normalize_tool_result
 
 
 def _config(openai_api_key="test-key"):

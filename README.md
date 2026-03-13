@@ -1,4 +1,4 @@
-# coffee
+# coffee_with_llm
 
 A model-agnostic Python library providing a unified API for OpenAI, Anthropic Claude, and Google Gemini.
 
@@ -15,14 +15,14 @@ A model-agnostic Python library providing a unified API for OpenAI, Anthropic Cl
 ## Installation
 
 ```bash
-pip install coffee
+pip install coffee_with_llm
 ```
 
 ## Quick Start
 
 ```python
 import asyncio
-from coffee import AskLLM
+from coffee_with_llm import AskLLM
 
 async def main():
     # Initialize with any model (model is required)
@@ -61,7 +61,7 @@ export GOOGLE_API_KEY="your-google-key"
 ### Basic Usage
 
 ```python
-from coffee import AskLLM
+from coffee_with_llm import AskLLM
 
 # Model parameter is required
 llm = AskLLM(model="gpt-5.4")

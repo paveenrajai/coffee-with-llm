@@ -1,5 +1,5 @@
 [project]
-name = "coffee"
+name = "coffee_with_llm"
 version = "0.1.0"
 description = "Model-agnostic LLM library with unified API for OpenAI, Anthropic Claude, and Google Gemini"
 readme = "README.md"
@@ -52,7 +52,7 @@ package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["coffee*"]
+include = ["coffee_with_llm*"]
 
 [tool.black]
 line-length = 100
@@ -69,7 +69,7 @@ module = ["anthropic.*", "openai.*", "google.genai.*", "google.generativeai.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["coffee.providers.anthropic.*", "coffee.providers.google.*", "coffee.providers.openai.*"]
+module = ["coffee_with_llm.providers.anthropic.*", "coffee_with_llm.providers.google.*", "coffee_with_llm.providers.openai.*"]
 disallow_untyped_defs = false
 
 [tool.ruff]
