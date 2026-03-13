@@ -47,7 +47,7 @@ class ProviderProtocol(Protocol):
         """Generate text. Returns (text, usage)."""
         ...
 
-    async def generate_stream(
+    def generate_stream(
         self,
         *,
         prompt: str,
@@ -59,5 +59,6 @@ class ProviderProtocol(Protocol):
         instructions: Optional[str] = None,
         system_instruct: str = "",
     ) -> AsyncIterator[Union[str, TokenUsage]]:
-        """Stream text chunks, then TokenUsage as final yield. No tools or response_format."""
+        """Stream text chunks, then TokenUsage as final yield. No tools or response_format.
+        Implement as async generator; calling it returns the iterator directly."""
         ...

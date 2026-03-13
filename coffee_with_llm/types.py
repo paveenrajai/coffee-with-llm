@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Callable, Optional, Union
+from typing import AsyncIterator, Callable, Optional, Union, cast
 
 from .rate_limit import retry_stream
 
@@ -51,10 +51,13 @@ class StreamResult:
         self._iter: Optional[AsyncIterator[Union[str, TokenUsage]]] = None
 
     def __aiter__(self) -> StreamResult:
-        self._iter = retry_stream(
-            self._stream_factory,
-            max_retries=self._max_retries,
-        ).__aiter__()
+        self._iter = cast(
+            Optional[AsyncIterator[Union[str, TokenUsage]]],
+            retry_stream(
+                self._stream_factory,
+                max_retries=self._max_retries,
+            ).__aiter__(),
+        )
         return self
 
     async def __anext__(self) -> str:

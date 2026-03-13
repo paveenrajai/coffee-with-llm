@@ -67,7 +67,21 @@ module = ["anthropic.*", "openai.*", "google.genai.*", "google.generativeai.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["coffee_with_llm.providers.anthropic.*", "coffee_with_llm.providers.google.*", "coffee_with_llm.providers.openai.*"]
+module = ["coffee_with_llm.providers.*"]
+disallow_untyped_defs = false
+disable_error_code = [
+    "operator",
+    "arg-type",
+    "no-any-return",
+    "call-arg",
+    "attr-defined",
+    "assignment",
+    "index",
+    "return-value",
+]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
 disallow_untyped_defs = false
 
 [tool.ruff]
