@@ -29,9 +29,6 @@ jobs:
       - name: Ruff
         run: ruff check .
 
-      - name: Black
-        run: black --check .
-
       - name: Mypy
         run: mypy .
 
