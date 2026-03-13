@@ -12,17 +12,17 @@ pip install -e ".[dev]"
 pytest
 
 # Run with coverage
-pytest --cov=ask_llm --cov-report=html
+pytest --cov=coffee --cov-report=html
 ```
 
 ## 2. Check Package Structure
 
 ```bash
 # Verify package can be discovered
-python -c "import ask_llm; print(ask_llm.__version__ if hasattr(ask_llm, '__version__') else 'OK')"
+python -c "import coffee; print(coffee.__version__ if hasattr(coffee, '__version__') else 'OK')"
 
 # Check imports work
-python -c "from ask_llm import AskLLM, AskLLMError, ConfigurationError, APIError, ValidationError; print('All imports OK')"
+python -c "from coffee import AskLLM, AskLLMError, ConfigurationError, APIError, ValidationError; print('All imports OK')"
 ```
 
 ## 3. Build the Package
@@ -35,8 +35,8 @@ pip install build twine
 python -m build
 
 # This creates:
-# - dist/ask_llm-0.1.0.tar.gz (source distribution)
-# - dist/ask_llm-0.1.0-py3-none-any.whl (wheel)
+# - dist/coffee-0.1.0.tar.gz (source distribution)
+# - dist/coffee-0.1.0-py3-none-any.whl (wheel)
 ```
 
 ## 4. Check Built Package
@@ -60,14 +60,14 @@ python -m venv test_env
 source test_env/bin/activate  # On Windows: test_env\Scripts\activate
 
 # Install from the built wheel
-pip install dist/ask_llm-0.1.0-py3-none-any.whl
+pip install dist/coffee-0.1.0-py3-none-any.whl
 
 # Or install from source distribution
-pip install dist/ask_llm-0.1.0.tar.gz
+pip install dist/coffee-0.1.0.tar.gz
 
 # Verify installation
-python -c "import ask_llm; print(ask_llm.__version__ if hasattr(ask_llm, '__version__') else 'OK')"
-python -c "from ask_llm import AskLLM; print('Import successful')"
+python -c "import coffee; print(coffee.__version__ if hasattr(coffee, '__version__') else 'OK')"
+python -c "from coffee import AskLLM; print('Import successful')"
 
 # Run tests after installation
 pip install pytest pytest-asyncio
@@ -109,8 +109,8 @@ with open('pyproject.toml', 'rb') as f:
 # Test with Python 3.10
 python3.10 -m venv test_env_310
 source test_env_310/bin/activate
-pip install dist/ask_llm-0.1.0-py3-none-any.whl
-python -c "import ask_llm; print('Python 3.10 OK')"
+pip install dist/coffee-0.1.0-py3-none-any.whl
+python -c "import coffee; print('Python 3.10 OK')"
 deactivate
 
 # Test with Python 3.11, 3.12, 3.13 similarly
@@ -126,7 +126,7 @@ deactivate
 twine upload --repository-url https://test.pypi.org/legacy/ dist/*
 
 # Test install from Test PyPI
-pip install --index-url https://test.pypi.org/simple/ ask-llm
+pip install --index-url https://test.pypi.org/simple/ coffee
 ```
 
 ## 10. Final Checklist
@@ -156,7 +156,7 @@ cat MANIFEST.in
 ### Import Errors After Installation
 Check that `__init__.py` files exist in all packages:
 ```bash
-find ask_llm -name "__init__.py"
+find coffee -name "__init__.py"
 ```
 
 ### Version Issues

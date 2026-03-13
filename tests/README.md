@@ -1,6 +1,6 @@
 # Tests
 
-This directory contains unit tests for the `ask-llm` package.
+This directory contains unit tests for the `coffee` package.
 
 ## Running Tests
 
@@ -19,7 +19,7 @@ pytest
 ### Run with coverage
 
 ```bash
-pytest --cov=ask_llm --cov-report=html
+pytest --cov=coffee --cov-report=html
 ```
 
 ### Run specific test file

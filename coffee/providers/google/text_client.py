@@ -3,10 +3,9 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-import os
 import hashlib
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 from collections import OrderedDict
 
 from google import genai
@@ -18,13 +17,21 @@ from .utils.citations import (
 )
 import httpx
 
+from ...config import Config
 from ...exceptions import ConfigurationError, APIError
+from ...rate_limit import is_rate_limit_error
 from ...types import TokenUsage
+from ..tool_utils import (
+    extract_error_code,
+    normalize_tool_result,
+    should_break_loop,
+    update_step_tracking,
+)
 
 logger = logging.getLogger(__name__)
 
-MAX_CONSECUTIVE_REASONING_ONLY = 3
-
+MAX_CACHED_CONTEXTS = 10
+CONTEXT_TTL_SECONDS = 3600  # 1 hour
 
 # Gemini API rejects these JSON Schema keys; strip them when converting.
 _GEMINI_REJECTED_KEYS = frozenset({
@@ -108,13 +115,19 @@ def _convert_tools_to_gemini(tools_schema: List[Dict[str, Any]]) -> List[Dict[st
 
 
 class GoogleTextClient:
-    def __init__(self) -> None:
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if not api_key:
-            raise ConfigurationError("GOOGLE_API_KEY environment variable is not set")
+    def __init__(
+        self,
+        config: Config,
+        request_timeout: Optional[float] = None,
+        google_explicit_cache: bool = True,
+        google_inline_citations: bool = True,
+    ) -> None:
+        self._api_key = config.require_google_key()
+        self._google_explicit_cache = google_explicit_cache
+        self._google_inline_citations = google_inline_citations
 
         try:
-            self._client = genai.Client(api_key=api_key)
+            self._client = genai.Client(api_key=self._api_key)
         except ImportError as e:
             raise ConfigurationError(
                 "Google GenAI package not installed. Install with: pip install google-genai"
@@ -122,9 +135,10 @@ class GoogleTextClient:
         except Exception as e:
             raise ConfigurationError(f"Failed to initialize Google client: {e}") from e
 
+        self._request_timeout = request_timeout
         self._cached_contexts: OrderedDict[str, tuple[str, float]] = OrderedDict()
-        self._max_cached_contexts = 10
-        self._context_ttl_seconds = 3600
+        self._max_cached_contexts = MAX_CACHED_CONTEXTS
+        self._context_ttl_seconds = CONTEXT_TTL_SECONDS
 
     def _build_config_dict(
         self,
@@ -134,6 +148,7 @@ class GoogleTextClient:
         top_p: Optional[float] = None,
         response_format: Optional[Dict[str, Any]] = None,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
+        include_google_search: bool = True,
     ) -> Dict[str, Any]:
         """Build generation config as dict for Google Gemini API."""
         config_dict: Dict[str, Any] = {}
@@ -151,7 +166,7 @@ class GoogleTextClient:
                 config_dict["tools"] = [
                     types.Tool(function_declarations=gemini_decls)
                 ]
-            elif not tools_schema:
+            elif include_google_search and not tools_schema:
                 config_dict["tools"] = [{"google_search": {}}]
 
         if max_tokens is not None:
@@ -170,36 +185,6 @@ class GoogleTextClient:
 
         return config_dict
 
-    @staticmethod
-    def _normalize_tool_result(result: Any) -> Dict[str, Any]:
-        """Normalize tool execution result to standard format."""
-        try:
-            if hasattr(result, "ok"):
-                return {
-                    "ok": bool(getattr(result, "ok", False)),
-                    "result": getattr(result, "result", {}),
-                    "error": getattr(result, "error", None),
-                }
-            if isinstance(result, dict):
-                return {
-                    "ok": bool(result.get("ok", False)),
-                    "result": result.get("result", {}),
-                    "error": result.get("error", None),
-                }
-        except Exception as e:
-            logger.warning(f"Failed to normalize tool result: {e}")
-        return {"ok": False, "result": {}, "error": None}
-
-    @staticmethod
-    def _extract_error_code(payload: Dict[str, Any]) -> Optional[str]:
-        """Extract tool-defined error_code from payload."""
-        result = payload.get("result") or {}
-        if isinstance(result, dict):
-            code = result.get("error_code")
-            if isinstance(code, str) and code:
-                return code
-        return payload.get("error_code") if isinstance(payload.get("error_code"), str) else None
-
     async def _execute_tool(
         self,
         name: Optional[str],
@@ -216,7 +201,7 @@ class GoogleTextClient:
                 result = await maybe
             else:
                 result = maybe
-            return self._normalize_tool_result(result)
+            return normalize_tool_result(result)
         except Exception as e:
             logger.error(f"Tool execution failed for {name}: {e}")
             return {"ok": False, "result": {}, "error": str(e)}
@@ -234,11 +219,7 @@ class GoogleTextClient:
         if not system_instruct or not system_instruct.strip():
             return None
 
-        enable_explicit_cache = (
-            os.getenv("GOOGLE_EXPLICIT_CACHE", "1") or "1"
-        ).strip() not in ("0", "false", "False")
-
-        if not enable_explicit_cache:
+        if not self._google_explicit_cache:
             return None
 
         model_lower = model.lower()
@@ -293,6 +274,60 @@ class GoogleTextClient:
 
         return None
 
+    def _get_tool_error_retry_message(
+        self,
+        output_payloads: List[Dict[str, Any]],
+        tool_error_callback: Optional[Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]],
+    ) -> Optional[str]:
+        """Check tool outputs for errors; return retry message if callback provides one."""
+        if not tool_error_callback:
+            return None
+        for out in output_payloads:
+            if out["payload"].get("ok"):
+                continue
+            msg = tool_error_callback(
+                out["name"], extract_error_code(out["payload"]), out["payload"]
+            )
+            if msg:
+                return msg
+        return None
+
+    def _build_initial_contents(
+        self,
+        cached_context_name: Optional[str],
+        messages: Optional[List[Dict[str, Any]]],
+        prompt: str,
+        system_instruct: str,
+    ) -> List[Any]:
+        """Build initial contents for Gemini API request."""
+        out: List[Any] = []
+        if cached_context_name:
+            if messages:
+                for msg in messages:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    google_role = "model" if role == "assistant" else "user"
+                    out.append({"role": google_role, "parts": [{"text": content}]})
+            out.append(prompt)
+        else:
+            if messages:
+                for i, msg in enumerate(messages):
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    google_role = "model" if role == "assistant" else "user"
+                    if i == 0 and role == "user" and system_instruct:
+                        content = f"{system_instruct}\n\n{content}"
+                    out.append({"role": google_role, "parts": [{"text": content}]})
+                out.append({"role": "user", "parts": [{"text": prompt}]})
+            else:
+                merged = (
+                    f"{system_instruct}\n\n{prompt}"
+                    if (system_instruct or "").strip()
+                    else prompt
+                )
+                out.append(merged)
+        return out
+
     def _extract_function_calls(self, resp: Any) -> List[Dict[str, Any]]:
         """Extract function calls from Gemini response."""
         calls: List[Dict[str, Any]] = []
@@ -320,21 +355,21 @@ class GoogleTextClient:
         prompt: str,
         model: str,
         messages: Optional[List[Dict[str, Any]]] = None,
-        system_instruct: str = "",
         max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
         top_p: Optional[float] = None,
-        response_format: Optional[Dict[str, Any]] = None,
+        presence_penalty: Optional[float] = None,
+        instructions: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Dict[str, Any]] = None,
         execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
         tool_error_callback: Optional[Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]] = None,
         max_steps: int = 16,
         max_effective_tool_steps: int = 8,
-        instructions: Optional[str] = None,
-        presence_penalty: Optional[float] = None,
-        reasoning_effort: Optional[str] = None,
-        force_tool_use: Optional[bool] = None,
-    ) -> str:
+        force_tool_use: bool = False,
+        temperature: Optional[float] = None,
+        system_instruct: str = "",
+    ) -> tuple[str, TokenUsage]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
 
@@ -348,33 +383,9 @@ class GoogleTextClient:
         )
 
         def build_initial_contents() -> List[Any]:
-            out: List[Any] = []
-            if cached_context_name:
-                if messages:
-                    for msg in messages:
-                        role = msg.get("role", "user")
-                        content = msg.get("content", "")
-                        google_role = "model" if role == "assistant" else "user"
-                        out.append({"role": google_role, "parts": [{"text": content}]})
-                out.append(prompt)
-            else:
-                if messages:
-                    for i, msg in enumerate(messages):
-                        role = msg.get("role", "user")
-                        content = msg.get("content", "")
-                        google_role = "model" if role == "assistant" else "user"
-                        if i == 0 and role == "user" and system_instruct:
-                            content = f"{system_instruct}\n\n{content}"
-                        out.append({"role": google_role, "parts": [{"text": content}]})
-                    out.append({"role": "user", "parts": [{"text": prompt}]})
-                else:
-                    merged = (
-                        f"{system_instruct}\n\n{prompt}"
-                        if (system_instruct or "").strip()
-                        else prompt
-                    )
-                    out.append(merged)
-            return out
+            return self._build_initial_contents(
+                cached_context_name, messages, prompt, system_instruct
+            )
 
         contents = build_initial_contents()
         config = self._build_config_dict(
@@ -405,8 +416,7 @@ class GoogleTextClient:
             try:
                 resp = await self._client.aio.models.generate_content(**request_kwargs)
             except Exception as e:
-                error_str = str(e).lower()
-                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                if is_rate_limit_error(e):
                     raise
                 logger.error(f"Google API call failed: {e}")
                 raise APIError(f"Google API request failed: {e}") from e
@@ -442,18 +452,9 @@ class GoogleTextClient:
                 if name and "reasoning" not in (name or "").lower():
                     had_non_reasoning_tool = True
 
-            retry_message: Optional[str] = None
-            if tool_error_callback:
-                for out in output_payloads:
-                    if out["payload"].get("ok"):
-                        continue
-                    msg = tool_error_callback(
-                        out["name"], self._extract_error_code(out["payload"]), out["payload"]
-                    )
-                    if msg:
-                        retry_message = msg
-                        break
-
+            retry_message = self._get_tool_error_retry_message(
+                output_payloads, tool_error_callback
+            )
             if retry_message is not None:
                 contents = build_initial_contents() + [{"role": "user", "parts": [{"text": retry_message}]}]
                 request_kwargs["contents"] = contents
@@ -474,10 +475,18 @@ class GoogleTextClient:
             contents.append(types.Content(role="user", parts=response_parts))
             request_kwargs["contents"] = contents
 
-            effective_steps = effective_steps + 1 if had_non_reasoning_tool else effective_steps
-            consecutive_reasoning_only = 0 if had_non_reasoning_tool else consecutive_reasoning_only + 1
+            effective_steps, consecutive_reasoning_only = update_step_tracking(
+                had_non_reasoning_tool,
+                effective_steps,
+                consecutive_reasoning_only,
+                max_effective_tool_steps,
+            )
 
-            if effective_steps >= max_effective_tool_steps or consecutive_reasoning_only >= MAX_CONSECUTIVE_REASONING_ONLY:
+            if should_break_loop(
+                effective_steps,
+                consecutive_reasoning_only,
+                max_effective_tool_steps,
+            ):
                 break
 
         text = str(getattr(last_resp, "text", None) or getattr(last_resp, "output_text", "") or "") if last_resp else ""
@@ -488,10 +497,7 @@ class GoogleTextClient:
             raise APIError("Empty response received from Google API")
 
         try:
-            enable_inline = (
-                os.getenv("GOOGLE_INLINE_CITATIONS", "1") or "1"
-            ).strip() not in ("0", "false", "False")
-            if enable_inline and last_resp:
+            if self._google_inline_citations and last_resp:
                 urls = collect_grounding_urls(last_resp)
                 if urls:
                     async with httpx.AsyncClient(
@@ -515,3 +521,63 @@ class GoogleTextClient:
             cached_tokens=total_cached if total_cached else None,
         )
         return text, usage
+
+    async def generate_stream(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        temperature: Optional[float] = None,
+        instructions: Optional[str] = None,
+        system_instruct: str = "",
+    ) -> AsyncIterator[Union[str, TokenUsage]]:
+        """Stream text chunks, then TokenUsage. No tools or response_format support."""
+        system_instruct = system_instruct or (instructions or "")
+        contents: List[Any] = []
+        if messages:
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                google_role = "model" if role == "assistant" else "user"
+                contents.append({"role": google_role, "parts": [{"text": content}]})
+            contents.append({"role": "user", "parts": [{"text": prompt}]})
+        else:
+            merged = f"{system_instruct}\n\n{prompt}".strip() if system_instruct.strip() else prompt
+            contents.append(merged)
+
+        config = self._build_config_dict(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            response_format=None,
+            tools_schema=None,
+            include_google_search=False,
+        )
+
+        try:
+            stream = self._client.aio.models.generate_content_stream(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            last_chunk = None
+            async for chunk in stream:
+                last_chunk = chunk
+                text = getattr(chunk, "text", None) or ""
+                if text:
+                    yield text
+            um = getattr(last_chunk, "usage_metadata", None) if last_chunk else None
+            if um:
+                inp = getattr(um, "prompt_token_count", 0) or 0
+                out = getattr(um, "candidates_token_count", 0) or 0
+                cached = getattr(um, "cached_content_token_count", None)
+                yield TokenUsage(inp, out, inp + out, int(cached) if cached is not None else None)
+            else:
+                yield TokenUsage(0, 0, 0, None)
+        except Exception as e:
+            if is_rate_limit_error(e):
+                raise
+            raise APIError(f"Google streaming failed: {e}") from e

@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from ask_llm import AskLLM, TokenUsage
-from ask_llm.exceptions import APIError, ConfigurationError, ValidationError
+from coffee import AskLLM, TokenUsage
+from coffee.exceptions import APIError, ConfigurationError, ValidationError
 
 
 class TestAskLLMInitialization:
@@ -28,13 +28,13 @@ class TestAskLLMInitialization:
 
     def test_init_with_gemini_model(self, mock_google_api_key):
         """Test initialization with Gemini model."""
-        with patch("ask_llm.providers.google.text_client.genai.Client"):
+        with patch("coffee.providers.google.text_client.genai.Client"):
             llm = AskLLM(model="gemini-2.0-flash-exp")
             assert llm._model == "gemini-2.0-flash-exp"
 
     def test_init_with_google_prefix(self, mock_google_api_key):
         """Test initialization with 'google' prefix."""
-        with patch("ask_llm.providers.google.text_client.genai.Client"):
+        with patch("coffee.providers.google.text_client.genai.Client"):
             llm = AskLLM(model="google-gemini-pro")
             assert llm._model == "google-gemini-pro"
 
@@ -176,7 +176,7 @@ class TestAskLLMAskMethod:
     @pytest.mark.asyncio
     async def test_ask_with_google_success(self, mock_google_api_key):
         """Test successful Google API call."""
-        with patch("ask_llm.providers.google.text_client.genai.Client"):
+        with patch("coffee.providers.google.text_client.genai.Client"):
             llm = AskLLM(model="gemini-2.0-flash-exp")
             mock_client_instance = MagicMock()
             mock_client_instance.generate = AsyncMock(return_value="Test response")
@@ -236,4 +236,53 @@ class TestAskLLMAskMethod:
 
             with pytest.raises(ConfigurationError, match="Config error"):
                 await llm.ask(prompt="test")
+
+
+class TestAskLLMStreaming:
+    """Tests for AskLLM streaming."""
+
+    @pytest.mark.asyncio
+    async def test_stream_returns_stream_result(self, mock_openai_api_key):
+        """stream=True returns StreamResult with chunks and usage."""
+        async def mock_stream(*args, **kwargs):
+            yield "Hello "
+            yield "world!"
+            yield TokenUsage(10, 5, 15, None)
+
+        with patch("openai.AsyncOpenAI"):
+            llm = AskLLM(model="gpt-4o-mini")
+            llm._client.generate_stream = mock_stream
+
+        result = await llm.ask(prompt="hi", stream=True)
+        chunks = []
+        async for c in result:
+            chunks.append(c)
+        assert chunks == ["Hello ", "world!"]
+        assert result.usage is not None
+        assert result.usage.input_tokens == 10
+        assert result.usage.output_tokens == 5
+
+    @pytest.mark.asyncio
+    async def test_stream_with_tools_raises(self, mock_openai_api_key):
+        """stream=True with tools_schema raises ValidationError."""
+        with patch("openai.AsyncOpenAI"):
+            llm = AskLLM(model="gpt-4o-mini")
+            with pytest.raises(ValidationError, match="stream=True is not supported"):
+                await llm.ask(
+                    prompt="hi",
+                    stream=True,
+                    tools_schema=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+                )
+
+    @pytest.mark.asyncio
+    async def test_stream_with_response_format_raises(self, mock_openai_api_key):
+        """stream=True with response_format raises ValidationError."""
+        with patch("openai.AsyncOpenAI"):
+            llm = AskLLM(model="gpt-4o-mini")
+            with pytest.raises(ValidationError, match="stream=True is not supported"):
+                await llm.ask(
+                    prompt="hi",
+                    stream=True,
+                    response_format={"type": "json_object"},
+                )
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 class AskLLMError(Exception):
-    """Base exception for ask_llm library."""
+    """Base exception for coffee library."""
 
     pass
 

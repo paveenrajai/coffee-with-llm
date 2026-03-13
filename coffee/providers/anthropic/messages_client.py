@@ -5,15 +5,20 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
+from ...config import Config
 from ...exceptions import ConfigurationError, APIError
+from ...rate_limit import is_rate_limit_error
 from ...types import TokenUsage
+from ..tool_utils import (
+    extract_error_code,
+    normalize_tool_result,
+    should_break_loop,
+    update_step_tracking,
+)
 
 logger = logging.getLogger(__name__)
-
-MAX_CONSECUTIVE_REASONING_ONLY = 3
 
 
 def _convert_tools_to_anthropic(tools_schema: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -53,10 +58,8 @@ def _convert_tools_to_anthropic(tools_schema: List[Dict[str, Any]]) -> List[Dict
 class AnthropicMessagesClient:
     """Anthropic Claude client using Messages API with tool use support."""
 
-    def __init__(self) -> None:
-        self._api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not self._api_key:
-            raise ConfigurationError("ANTHROPIC_API_KEY environment variable is not set")
+    def __init__(self, config: Config, request_timeout: Optional[float] = None) -> None:
+        self._api_key = config.require_anthropic_key()
 
         try:
             from anthropic import AsyncAnthropic
@@ -68,36 +71,7 @@ class AnthropicMessagesClient:
             raise ConfigurationError(f"Failed to import Anthropic client: {e}") from e
 
         self._AsyncAnthropic = AsyncAnthropic
-
-    @staticmethod
-    def _normalize_tool_result(result: Any) -> Dict[str, Any]:
-        """Normalize tool execution result to standard format."""
-        try:
-            if hasattr(result, "ok"):
-                return {
-                    "ok": bool(getattr(result, "ok", False)),
-                    "result": getattr(result, "result", {}),
-                    "error": getattr(result, "error", None),
-                }
-            if isinstance(result, dict):
-                return {
-                    "ok": bool(result.get("ok", False)),
-                    "result": result.get("result", {}),
-                    "error": result.get("error", None),
-                }
-        except Exception as e:
-            logger.warning(f"Failed to normalize tool result: {e}")
-        return {"ok": False, "result": {}, "error": None}
-
-    @staticmethod
-    def _extract_error_code(payload: Dict[str, Any]) -> Optional[str]:
-        """Extract tool-defined error_code from payload."""
-        result = payload.get("result") or {}
-        if isinstance(result, dict):
-            code = result.get("error_code")
-            if isinstance(code, str) and code:
-                return code
-        return payload.get("error_code") if isinstance(payload.get("error_code"), str) else None
+        self._request_timeout = request_timeout
 
     async def _execute_tool(
         self,
@@ -115,34 +89,10 @@ class AnthropicMessagesClient:
                 result = await maybe
             else:
                 result = maybe
-            return self._normalize_tool_result(result)
+            return normalize_tool_result(result)
         except Exception as e:
             logger.error(f"Tool execution failed for {name}: {e}")
             return {"ok": False, "result": {}, "error": str(e)}
-
-    def _update_step_tracking(
-        self,
-        had_non_reasoning_tool: bool,
-        effective_steps: int,
-        consecutive_reasoning_only: int,
-        max_effective_tool_steps: int,
-    ) -> tuple[int, int]:
-        """Update step tracking counters."""
-        if had_non_reasoning_tool:
-            return effective_steps + 1, 0
-        return effective_steps, consecutive_reasoning_only + 1
-
-    def _should_break_loop(
-        self,
-        effective_steps: int,
-        consecutive_reasoning_only: int,
-        max_effective_tool_steps: int,
-    ) -> bool:
-        """Check if the generation loop should break."""
-        return (
-            effective_steps >= max_effective_tool_steps
-            or consecutive_reasoning_only >= MAX_CONSECUTIVE_REASONING_ONLY
-        )
 
     def _build_messages(
         self,
@@ -176,6 +126,69 @@ class AnthropicMessagesClient:
             elif hasattr(block, "type") and getattr(block, "type") == "text":
                 texts.append(getattr(block, "text", "") or "")
         return "".join(texts)
+
+    def _parse_tool_use(self, block: Any) -> Dict[str, Any]:
+        """Parse tool_use block to {id, name, input}."""
+        if isinstance(block, dict):
+            inp = block.get("input", {})
+            if isinstance(inp, str):
+                try:
+                    inp = json.loads(inp) if inp else {}
+                except json.JSONDecodeError:
+                    inp = {}
+            return {
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "input": inp,
+            }
+        inp = getattr(block, "input", {}) or {}
+        if isinstance(inp, str):
+            try:
+                inp = json.loads(inp) if inp else {}
+            except json.JSONDecodeError:
+                inp = {}
+        return {
+            "id": getattr(block, "id", ""),
+            "name": getattr(block, "name", ""),
+            "input": inp if isinstance(inp, dict) else {},
+        }
+
+    def _get_tool_error_retry_message(
+        self,
+        output_payloads: List[Dict[str, Any]],
+        tool_error_callback: Optional[Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]],
+    ) -> Optional[str]:
+        """Check tool outputs for errors; return retry message if callback provides one."""
+        if not tool_error_callback:
+            return None
+        for out in output_payloads:
+            if out["payload"].get("ok"):
+                continue
+            msg = tool_error_callback(
+                out["name"], extract_error_code(out["payload"]), out["payload"]
+            )
+            if msg:
+                return msg
+        return None
+
+    async def _finalize_empty_response(
+        self,
+        client: Any,
+        params: Dict[str, Any],
+        base_messages: List[Dict[str, Any]],
+    ) -> tuple[str, int, int]:
+        """Finalize when response is empty; returns (final_text, input_delta, output_delta)."""
+        finalize_params = dict(params)
+        finalize_params.pop("tools", None)
+        finalize_params["messages"] = base_messages + [
+            {"role": "user", "content": "Finalize now. Return the final answer. No further tool calls."}
+        ]
+        finalize_resp = await client.messages.create(**finalize_params)
+        text = self._content_to_text(getattr(finalize_resp, "content", []) or [])
+        fu = getattr(finalize_resp, "usage", None)
+        inp_delta = getattr(fu, "input_tokens", 0) or 0 if fu else 0
+        out_delta = getattr(fu, "output_tokens", 0) or 0 if fu else 0
+        return text, inp_delta, out_delta
 
     def _blocks_to_api_format(self, content: Any) -> List[Dict[str, Any]]:
         """Convert response content blocks to API request format."""
@@ -219,14 +232,19 @@ class AnthropicMessagesClient:
         max_steps: int = 16,
         max_effective_tool_steps: int = 8,
         force_tool_use: bool = False,
-    ) -> str:
+        temperature: Optional[float] = None,
+        system_instruct: str = "",
+    ) -> tuple[str, TokenUsage]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
         if not model or not model.strip():
             raise ValueError("Model name cannot be empty")
 
         try:
-            client = self._AsyncAnthropic(api_key=self._api_key)
+            client_kwargs: Dict[str, Any] = {"api_key": self._api_key}
+            if self._request_timeout is not None:
+                client_kwargs["timeout"] = self._request_timeout
+            client = self._AsyncAnthropic(**client_kwargs)
         except Exception as e:
             raise APIError(f"Failed to initialize Anthropic client: {e}") from e
 
@@ -271,8 +289,7 @@ class AnthropicMessagesClient:
                     resp = await client.messages.create(**params)
                 last_resp = resp
             except Exception as e:
-                error_str = str(e).lower()
-                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                if is_rate_limit_error(e):
                     logger.warning(f"Anthropic API rate limit hit at step {step + 1}: {e}")
                     raise
                 logger.error(f"Anthropic API call failed at step {step + 1}: {e}")
@@ -316,17 +333,12 @@ class AnthropicMessagesClient:
                 )
 
             if stop_reason == "tool_use":
-                tool_uses = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "tool_use":
-                            tool_uses.append(block)
-                    elif hasattr(block, "type") and getattr(block, "type") == "tool_use":
-                        tool_uses.append({
-                            "id": getattr(block, "id", ""),
-                            "name": getattr(block, "name", ""),
-                            "input": getattr(block, "input", {}),
-                        })
+                tool_uses = [
+                    self._parse_tool_use(block)
+                    for block in content
+                    if (isinstance(block, dict) and block.get("type") == "tool_use")
+                    or (getattr(block, "type", None) == "tool_use")
+                ]
 
                 if not tool_uses:
                     logger.warning(
@@ -336,42 +348,24 @@ class AnthropicMessagesClient:
                     )
                     break
 
-                tool_names = [
-                    t.get("name", "") if isinstance(t, dict) else getattr(t, "name", "")
-                    for t in tool_uses
-                ]
+                tool_names = [t["name"] for t in tool_uses]
                 logger.info("[ANTHROPIC] Executing tools: %s", tool_names)
 
                 output_payloads: List[Dict[str, Any]] = []
                 had_non_reasoning_tool = False
 
                 for tu in tool_uses:
-                    tu_id = tu.get("id", "") if isinstance(tu, dict) else getattr(tu, "id", "")
-                    name = tu.get("name", "") if isinstance(tu, dict) else getattr(tu, "name", "")
-                    inp = tu.get("input", {}) if isinstance(tu, dict) else getattr(tu, "input", {})
-                    if isinstance(inp, str):
-                        try:
-                            inp = json.loads(inp) if inp else {}
-                        except json.JSONDecodeError:
-                            inp = {}
-
+                    tu_id = tu["id"]
+                    name = tu["name"]
+                    inp = tu["input"]
                     result_payload = await self._execute_tool(name, inp, execute_tool_cb)
                     output_payloads.append({"tool_use_id": tu_id, "name": name, "payload": result_payload})
                     if name and "reasoning" not in name.lower():
                         had_non_reasoning_tool = True
 
-                retry_message: Optional[str] = None
-                if tool_error_callback:
-                    for out in output_payloads:
-                        if out["payload"].get("ok"):
-                            continue
-                        msg = tool_error_callback(
-                            out["name"], self._extract_error_code(out["payload"]), out["payload"]
-                        )
-                        if msg:
-                            retry_message = msg
-                            break
-
+                retry_message = self._get_tool_error_retry_message(
+                    output_payloads, tool_error_callback
+                )
                 if retry_message is not None:
                     logger.info("[TOOL_ERROR] New session (callback returned retry message)")
                     new_messages = base_messages + [{"role": "user", "content": retry_message}]
@@ -395,14 +389,14 @@ class AnthropicMessagesClient:
                 params["messages"] = new_messages
                 base_messages = new_messages
 
-                effective_steps, consecutive_reasoning_only = self._update_step_tracking(
+                effective_steps, consecutive_reasoning_only = update_step_tracking(
                     had_non_reasoning_tool,
                     effective_steps,
                     consecutive_reasoning_only,
                     max_effective_tool_steps,
                 )
 
-                if self._should_break_loop(
+                if should_break_loop(
                     effective_steps, consecutive_reasoning_only, max_effective_tool_steps
                 ):
                     logger.info(
@@ -424,20 +418,13 @@ class AnthropicMessagesClient:
 
         if not final_text.strip():
             try:
-                finalize_params = dict(params)
-                finalize_params.pop("tools", None)
-                finalize_params["messages"] = base_messages + [
-                    {"role": "user", "content": "Finalize now. Return the final answer. No further tool calls."}
-                ]
-                finalize_resp = await client.messages.create(**finalize_params)
-                final_text = self._content_to_text(getattr(finalize_resp, "content", []) or [])
-                fu = getattr(finalize_resp, "usage", None)
-                if fu:
-                    total_input += getattr(fu, "input_tokens", 0) or 0
-                    total_output += getattr(fu, "output_tokens", 0) or 0
+                final_text, inp_delta, out_delta = await self._finalize_empty_response(
+                    client, params, base_messages
+                )
+                total_input += inp_delta
+                total_output += out_delta
             except Exception as e:
-                error_str = str(e).lower()
-                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                if is_rate_limit_error(e):
                     raise
                 logger.warning(f"Failed to finalize response: {e}")
                 if not final_text:
@@ -453,3 +440,59 @@ class AnthropicMessagesClient:
             cached_tokens=None,
         )
         return final_text, usage
+
+    async def generate_stream(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        temperature: Optional[float] = None,
+        instructions: Optional[str] = None,
+        system_instruct: str = "",
+    ) -> AsyncIterator[Union[str, TokenUsage]]:
+        """Stream text chunks, then TokenUsage. No tools or response_format support."""
+        msgs = self._build_messages(prompt, messages)
+        system = (instructions or system_instruct or "").strip() or None
+
+        params: Dict[str, Any] = {
+            "model": model,
+            "messages": msgs,
+            "max_tokens": max_tokens or 4096,
+        }
+        if system:
+            params["system"] = system
+        if temperature is not None:
+            params["temperature"] = temperature
+        if top_p is not None:
+            params["top_p"] = top_p
+
+        try:
+            client_kwargs: Dict[str, Any] = {"api_key": self._api_key}
+            if self._request_timeout is not None:
+                client_kwargs["timeout"] = self._request_timeout
+            client = self._AsyncAnthropic(**client_kwargs)
+        except Exception as e:
+            raise APIError(f"Failed to initialize Anthropic client: {e}") from e
+
+        try:
+            async with client.messages.stream(**params) as stream:
+                async for event in stream:
+                    if getattr(event, "type", "") == "content_block_delta":
+                        delta = getattr(getattr(event, "delta", None), "text", "") or ""
+                        if delta:
+                            yield delta
+                final = await stream.get_final_message()
+                usage_obj = getattr(final, "usage", None)
+                if usage_obj:
+                    inp = getattr(usage_obj, "input_tokens", 0) or 0
+                    out = getattr(usage_obj, "output_tokens", 0) or 0
+                    yield TokenUsage(inp, out, inp + out, None)
+                else:
+                    yield TokenUsage(0, 0, 0, None)
+        except Exception as e:
+            if is_rate_limit_error(e):
+                raise
+            raise APIError(f"Anthropic streaming failed: {e}") from e

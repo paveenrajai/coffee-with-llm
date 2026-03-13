@@ -3,24 +3,29 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
+from ...config import Config
 from ...exceptions import ConfigurationError, APIError
+from ...rate_limit import is_rate_limit_error
 from ...types import TokenUsage
+from ..tool_utils import (
+    extract_error_code,
+    normalize_tool_result,
+    should_break_loop,
+    update_step_tracking,
+)
 
 logger = logging.getLogger(__name__)
 
 REASONING_LOG_TOOL_NAME = "reasoning_log"
-MAX_CONSECUTIVE_REASONING_ONLY = 3
 REASONING_PREVIEW_LENGTH = 200
 
 
 class OpenAIResponsesClient:
-    def __init__(self) -> None:
-        self._api_key = os.getenv("OPENAI_API_KEY")
-        if not self._api_key:
-            raise ConfigurationError("OPENAI_API_KEY environment variable is not set")
+    def __init__(self, config: Config, request_timeout: Optional[float] = None) -> None:
+        self._api_key = config.require_openai_key()
+        self._request_timeout = request_timeout
 
         try:
             from openai import AsyncOpenAI
@@ -32,26 +37,6 @@ class OpenAIResponsesClient:
             raise ConfigurationError(f"Failed to import OpenAI client: {e}") from e
 
         self._AsyncOpenAI = AsyncOpenAI
-
-    @staticmethod
-    def _normalize_tool_result(result: Any) -> Dict[str, Any]:
-        """Normalize tool execution result to a standard format."""
-        try:
-            if hasattr(result, "ok"):
-                return {
-                    "ok": bool(getattr(result, "ok", False)),
-                    "result": getattr(result, "result", {}),
-                    "error": getattr(result, "error", None),
-                }
-            if isinstance(result, dict):
-                return {
-                    "ok": bool(result.get("ok", False)),
-                    "result": result.get("result", {}),
-                    "error": result.get("error", None),
-                }
-        except Exception as e:
-            logger.warning(f"Failed to normalize tool result: {e}")
-        return {"ok": False, "result": {}, "error": None}
 
     @staticmethod
     def _parse_response_format(response_format: Any) -> Optional[Dict[str, Any]]:
@@ -161,6 +146,83 @@ class OpenAIResponsesClient:
 
         return reasoning_text
 
+    def _parse_tool_call(self, tc: Any) -> tuple[Optional[str], Optional[str], Dict[str, Any]]:
+        """Parse tool call to (id, name, args)."""
+        try:
+            tc_id = getattr(tc, "id", None)
+            name = getattr(tc, "name", None) or getattr(
+                getattr(tc, "function", object()), "name", None
+            )
+            args_raw = getattr(tc, "arguments", None) or getattr(
+                getattr(tc, "function", object()), "arguments", "{}"
+            )
+            args = json.loads(args_raw or "{}")
+            return tc_id, name, args
+        except Exception as e:
+            logger.debug(f"Failed to parse tool call: {e}")
+            return getattr(tc, "id", None), getattr(tc, "name", None), {}
+
+    def _get_tool_error_retry_message(
+        self,
+        tool_calls: List[Any],
+        outputs: List[Dict[str, Any]],
+        tool_error_callback: Optional[Callable],
+    ) -> Optional[str]:
+        """Check tool outputs for errors; return retry message if callback provides one."""
+        if not tool_error_callback:
+            return None
+        for tc, out in zip(tool_calls, outputs):
+            try:
+                payload = json.loads(out["output"]) if isinstance(out.get("output"), str) else {}
+            except json.JSONDecodeError:
+                payload = {}
+            if payload.get("ok"):
+                continue
+            name = getattr(tc, "name", None) or getattr(
+                getattr(tc, "function", object()), "name", None
+            )
+            msg = tool_error_callback(name or "", extract_error_code(payload), payload)
+            if msg:
+                return msg
+        return None
+
+    def _get_fc_error_retry_message(
+        self,
+        fc_outputs: List[Dict[str, Any]],
+        tool_error_callback: Optional[Callable],
+    ) -> Optional[str]:
+        """Check function call outputs for errors; return retry message if callback provides one."""
+        if not tool_error_callback:
+            return None
+        for fco in fc_outputs:
+            payload = fco.get("payload", {})
+            if payload.get("ok"):
+                continue
+            msg = tool_error_callback(
+                fco.get("name") or "", extract_error_code(payload), payload
+            )
+            if msg:
+                return msg
+        return None
+
+    async def _finalize_empty_response(
+        self,
+        client: Any,
+        params: Dict[str, Any],
+        input_list: List[Dict[str, Any]],
+    ) -> tuple[str, Optional[TokenUsage]]:
+        """Finalize when response is empty; returns (final_text, usage_delta)."""
+        finalize_params = dict(params)
+        finalize_params.pop("tools", None)
+        finalize_params_input = list(input_list) + [
+            {"role": "system", "content": "Finalize now. Return the final answer in the requested format. No further tool calls."}
+        ]
+        finalize_params["input"] = finalize_params_input
+        finalize_resp = await client.responses.create(**finalize_params)
+        text = getattr(finalize_resp, "output_text", "") or ""
+        usage = self._extract_usage(finalize_resp)
+        return text, usage
+
     async def _execute_tool_with_context(
         self,
         name: Optional[str],
@@ -192,44 +254,10 @@ class OpenAIResponsesClient:
             else:
                 result = maybe
 
-            return self._normalize_tool_result(result)
+            return normalize_tool_result(result)
         except Exception as e:
             logger.error(f"Tool execution failed for {name}: {e}")
             return {"ok": False, "result": {}, "error": str(e)}
-
-    def _update_step_tracking(
-        self,
-        had_non_reasoning_tool: bool,
-        effective_steps: int,
-        consecutive_reasoning_only: int,
-        max_effective_tool_steps: int,
-    ) -> tuple[int, int]:
-        """Update step tracking counters and return new values."""
-        if had_non_reasoning_tool:
-            return effective_steps + 1, 0
-        return effective_steps, consecutive_reasoning_only + 1
-
-    def _should_break_loop(
-        self,
-        effective_steps: int,
-        consecutive_reasoning_only: int,
-        max_effective_tool_steps: int,
-    ) -> bool:
-        """Check if the generation loop should break."""
-        return (
-            effective_steps >= max_effective_tool_steps
-            or consecutive_reasoning_only >= MAX_CONSECUTIVE_REASONING_ONLY
-        )
-
-    @staticmethod
-    def _extract_error_code(payload: Dict[str, Any]) -> Optional[str]:
-        """Extract tool-defined error_code from payload. Tools may put it in result or top-level."""
-        result = payload.get("result") or {}
-        if isinstance(result, dict):
-            code = result.get("error_code")
-            if isinstance(code, str) and code:
-                return code
-        return payload.get("error_code") if isinstance(payload.get("error_code"), str) else None
 
     async def generate(
         self,
@@ -249,7 +277,9 @@ class OpenAIResponsesClient:
         max_steps: int = 16,
         max_effective_tool_steps: int = 8,
         force_tool_use: bool = False,
-    ) -> str:
+        temperature: Optional[float] = None,
+        system_instruct: str = "",
+    ) -> tuple[str, TokenUsage]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
 
@@ -257,7 +287,10 @@ class OpenAIResponsesClient:
             raise ValueError("Model name cannot be empty")
 
         try:
-            client = self._AsyncOpenAI(api_key=self._api_key)
+            client_kwargs: Dict[str, Any] = {"api_key": self._api_key}
+            if self._request_timeout is not None:
+                client_kwargs["timeout"] = self._request_timeout
+            client = self._AsyncOpenAI(**client_kwargs)
         except Exception as e:
             raise APIError(f"Failed to initialize OpenAI client: {e}") from e
 
@@ -321,11 +354,8 @@ class OpenAIResponsesClient:
                     resp = await client.responses.create(**params)
                 last_resp = resp
             except Exception as e:
-                error_str = str(e).lower()
-                # Check if it's a rate limit error (429)
-                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                if is_rate_limit_error(e):
                     logger.warning(f"OpenAI API rate limit hit at step {step + 1}: {e}")
-                    # Re-raise as-is so it can be caught by retry logic in llm.py
                     raise
                 logger.error(f"OpenAI API call failed at step {step + 1}: {e}")
                 raise APIError(f"OpenAI API request failed: {e}") from e
@@ -359,21 +389,7 @@ class OpenAIResponsesClient:
                 had_non_reasoning_tool = False
 
                 for tc in tool_calls:
-                    try:
-                        tc_id = getattr(tc, "id", None)
-                        name = getattr(tc, "name", None) or getattr(
-                            getattr(tc, "function", object()), "name", None
-                        )
-                        args_raw = getattr(tc, "arguments", None) or getattr(
-                            getattr(tc, "function", object()), "arguments", "{}"
-                        )
-                        args = json.loads(args_raw or "{}")
-                    except Exception as e:
-                        logger.debug(f"Failed to parse tool call: {e}")
-                        tc_id = getattr(tc, "id", None)
-                        name = getattr(tc, "name", None)
-                        args = {}
-
+                    tc_id, name, args = self._parse_tool_call(tc)
                     result_payload = await self._execute_tool_with_context(
                         name, args, reasoning_text, execute_tool_cb
                     )
@@ -385,24 +401,9 @@ class OpenAIResponsesClient:
                         {"tool_call_id": tc_id, "output": json.dumps(result_payload)}
                     )
 
-                retry_message: Optional[str] = None
-                if tool_error_callback:
-                    for tc, out in zip(tool_calls, outputs):
-                        try:
-                            payload = json.loads(out["output"]) if isinstance(out.get("output"), str) else {}
-                        except json.JSONDecodeError:
-                            payload = {}
-                        if payload.get("ok"):
-                            continue
-                        name = getattr(tc, "name", None) or getattr(
-                            getattr(tc, "function", object()), "name", None
-                        )
-                        error_code = self._extract_error_code(payload)
-                        msg = tool_error_callback(name or "", error_code, payload)
-                        if msg:
-                            retry_message = msg
-                            break
-
+                retry_message = self._get_tool_error_retry_message(
+                    tool_calls, outputs, tool_error_callback
+                )
                 if retry_message is not None:
                     logger.info("[TOOL_ERROR] New session (callback returned retry message)")
                     new_input = base_input + [{"role": "user", "content": retry_message}]
@@ -419,11 +420,8 @@ class OpenAIResponsesClient:
                         last_resp = resp
                         pending_resp = resp
                     except Exception as e:
-                        error_str = str(e).lower()
-                        # Check if it's a rate limit error (429)
-                        if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                        if is_rate_limit_error(e):
                             logger.warning(f"OpenAI API rate limit hit when submitting tool outputs: {e}")
-                            # Re-raise as-is so it can be caught by retry logic in llm.py
                             raise
                         logger.error(f"Failed to submit tool outputs: {e}")
                         raise APIError(f"Failed to submit tool outputs: {e}") from e
@@ -443,14 +441,14 @@ class OpenAIResponsesClient:
                 if getattr(resp, "output_text", ""):
                     break
 
-                effective_steps, consecutive_reasoning_only = self._update_step_tracking(
+                effective_steps, consecutive_reasoning_only = update_step_tracking(
                     had_non_reasoning_tool,
                     effective_steps,
                     consecutive_reasoning_only,
                     max_effective_tool_steps,
                 )
 
-                if self._should_break_loop(
+                if should_break_loop(
                     effective_steps, consecutive_reasoning_only, max_effective_tool_steps
                 ):
                     break
@@ -490,18 +488,9 @@ class OpenAIResponsesClient:
                     if (name or "") != REASONING_LOG_TOOL_NAME:
                         had_non_reasoning_tool = True
 
-                retry_message_fc: Optional[str] = None
-                if tool_error_callback:
-                    for fco in fc_outputs:
-                        payload = fco.get("payload", {})
-                        if payload.get("ok"):
-                            continue
-                        error_code = self._extract_error_code(payload)
-                        msg = tool_error_callback(fco.get("name") or "", error_code, payload)
-                        if msg:
-                            retry_message_fc = msg
-                            break
-
+                retry_message_fc = self._get_fc_error_retry_message(
+                    fc_outputs, tool_error_callback
+                )
                 if retry_message_fc is not None:
                     logger.info("[TOOL_ERROR] New session (callback returned retry message, output-array path)")
                     # Revert the output append so we don't send orphaned function_calls without outputs
@@ -527,14 +516,14 @@ class OpenAIResponsesClient:
 
                 params["input"] = input_list
 
-                effective_steps, consecutive_reasoning_only = self._update_step_tracking(
+                effective_steps, consecutive_reasoning_only = update_step_tracking(
                     had_non_reasoning_tool,
                     effective_steps,
                     consecutive_reasoning_only,
                     max_effective_tool_steps,
                 )
 
-                if self._should_break_loop(
+                if should_break_loop(
                     effective_steps, consecutive_reasoning_only, max_effective_tool_steps
                 ):
                     break
@@ -545,30 +534,17 @@ class OpenAIResponsesClient:
 
         if not final_text.strip():
             try:
-                finalize_params = dict(params)
-                finalize_params.pop("tools", None)
-                finalize_params_input = list(input_list)
-                finalize_params_input.append(
-                    {
-                        "role": "system",
-                        "content": "Finalize now. Return the final answer in the requested format. No further tool calls.",
-                    }
+                final_text, final_usage = await self._finalize_empty_response(
+                    client, params, input_list
                 )
-                finalize_params["input"] = finalize_params_input
-                finalize_resp = await client.responses.create(**finalize_params)
-                final_text = getattr(finalize_resp, "output_text", "") or ""
-                final_usage = self._extract_usage(finalize_resp)
                 if final_usage:
                     total_input += final_usage.input_tokens
                     total_output += final_usage.output_tokens
                     if final_usage.cached_tokens is not None:
                         total_cached = (total_cached or 0) + final_usage.cached_tokens
             except Exception as e:
-                error_str = str(e).lower()
-                # Check if it's a rate limit error (429)
-                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                if is_rate_limit_error(e):
                     logger.warning(f"OpenAI API rate limit hit during finalization: {e}")
-                    # Re-raise as-is so it can be caught by retry logic in llm.py
                     raise
                 logger.warning(f"Failed to finalize response: {e}")
                 if not final_text:
@@ -584,3 +560,62 @@ class OpenAIResponsesClient:
             cached_tokens=total_cached if total_cached else None,
         )
         return final_text, usage
+
+    async def generate_stream(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        temperature: Optional[float] = None,
+        instructions: Optional[str] = None,
+        system_instruct: str = "",
+    ) -> AsyncIterator[Union[str, TokenUsage]]:
+        """Stream text chunks, then TokenUsage. No tools or response_format support."""
+        input_list: List[Dict[str, Any]] = []
+        if messages:
+            for msg in messages:
+                input_list.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        input_list.append({"role": "user", "content": prompt})
+
+        params: Dict[str, Any] = {"model": model, "input": input_list}
+        if max_tokens is not None:
+            params["max_output_tokens"] = max_tokens
+        if top_p is not None:
+            params["top_p"] = top_p
+        if instructions or system_instruct:
+            params["instructions"] = (instructions or system_instruct or "").strip() or None
+        if params.get("instructions") is None:
+            params.pop("instructions", None)
+
+        try:
+            client_kwargs: Dict[str, Any] = {"api_key": self._api_key}
+            if self._request_timeout is not None:
+                client_kwargs["timeout"] = self._request_timeout
+            client = self._AsyncOpenAI(**client_kwargs)
+        except Exception as e:
+            raise APIError(f"Failed to initialize OpenAI client: {e}") from e
+
+        try:
+            stream = client.responses.stream(**params)
+            async with stream as s:
+                async for event in s:
+                    event_type = getattr(event, "type", "") or ""
+                    if "output_text" in event_type and "delta" in event_type:
+                        delta = getattr(event, "delta", None) or getattr(event, "text", "")
+                        if delta:
+                            yield delta
+                final = s.get_final_response()
+                if hasattr(final, "__await__"):
+                    final = await final
+                usage = self._extract_usage(final)
+                if usage:
+                    yield usage
+                else:
+                    yield TokenUsage(0, 0, 0, None)
+        except Exception as e:
+            if is_rate_limit_error(e):
+                raise
+            raise APIError(f"OpenAI streaming failed: {e}") from e

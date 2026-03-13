@@ -57,6 +57,6 @@ def mock_google_client():
     
     mock_client.models.generate_content = mock_generate
     
-    with patch("ask_llm.providers.google.text_client.genai.Client", return_value=mock_client):
+    with patch("coffee.providers.google.text_client.genai.Client", return_value=mock_client):
         yield mock_client
 

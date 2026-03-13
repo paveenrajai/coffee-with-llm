@@ -1,11 +1,11 @@
-# ask-llm
+# coffee
 
-A model-agnostic Python library providing a unified API for interacting with OpenAI and Google Gemini LLMs.
+A model-agnostic Python library providing a unified API for OpenAI, Anthropic Claude, and Google Gemini.
 
 ## Features
 
 - **Model-agnostic**: Automatically selects the appropriate provider based on model name
-- **Unified API**: Same interface for OpenAI and Google Gemini
+- **Unified API**: Same interface for OpenAI, Anthropic Claude, and Google Gemini
 - **Tool Calling**: Full support for OpenAI's tool calling with multi-step execution
 - **Structured Outputs**: Support for JSON schema and response formatting
 - **Caching**: Built-in prompt caching for both providers
@@ -15,33 +15,33 @@ A model-agnostic Python library providing a unified API for interacting with Ope
 ## Installation
 
 ```bash
-pip install ask-llm
+pip install coffee
 ```
 
 ## Quick Start
 
 ```python
 import asyncio
-from ask_llm import AskLLM
+from coffee import AskLLM
 
 async def main():
     # Initialize with any model (model is required)
-    llm = AskLLM(model="gpt-4o-mini")
+    llm = AskLLM(model="gpt-5.4")
     
     # Simple question
     response = await llm.ask(
         prompt="What is Python?",
         system_instruct="You are a helpful assistant."
     )
-    print(response)
+    print(response.text)
     
     # Use Google Gemini
-    llm_gemini = AskLLM(model="gemini-2.0-flash-exp")
+    llm_gemini = AskLLM(model="gemini-3.1-pro-preview")
     response = await llm_gemini.ask(
         prompt="Explain quantum computing",
         system_instruct="You are a physics expert."
     )
-    print(response)
+    print(response.text)
 
 asyncio.run(main())
 ```
@@ -52,6 +52,7 @@ Set environment variables for API keys:
 
 ```bash
 export OPENAI_API_KEY="your-openai-key"
+export ANTHROPIC_API_KEY="your-anthropic-key"
 export GOOGLE_API_KEY="your-google-key"
 ```
 
@@ -60,10 +61,10 @@ export GOOGLE_API_KEY="your-google-key"
 ### Basic Usage
 
 ```python
-from ask_llm import AskLLM
+from coffee import AskLLM
 
 # Model parameter is required
-llm = AskLLM(model="gpt-4o-mini")
+llm = AskLLM(model="gpt-5.4")
 response = await llm.ask(prompt="Hello, world!")
 ```
 
@@ -98,7 +99,7 @@ response = await llm.ask(
 )
 ```
 
-### Tool Calling (OpenAI)
+### Tool Calling (OpenAI, Anthropic, Google)
 
 ```python
 def get_weather(location: str) -> dict:
@@ -137,40 +138,59 @@ response = await llm.ask(
 ### Reasoning Models (OpenAI)
 
 ```python
-llm = AskLLM(model="o1-preview")
+llm = AskLLM(model="gpt-5.4")
 response = await llm.ask(
     prompt="Solve this math problem: 2x + 5 = 15",
     reasoning_effort="high"
 )
 ```
 
+### Streaming
+
+```python
+llm = AskLLM(model="gpt-5.4")
+result = await llm.ask(prompt="Explain recursion in programming.", stream=True)
+async for chunk in result:
+    print(chunk, end="", flush=True)
+print(f"\nUsage: {result.usage.input_tokens} in, {result.usage.output_tokens} out")
+```
+
+> **Note:** Streaming is not supported with `tools_schema` or `response_format`. `result.usage` is populated after iteration completes. Rate limits trigger retry before the first chunk.
+
 ## Supported Models
 
 ### OpenAI
+- `gpt-5.4`, `gpt-5.4-pro` (flagship, reasoning)
+- `gpt-5.3-instant`, `gpt-5-mini`, `gpt-5-nano` (fast, cost-effective)
 - `gpt-4o`, `gpt-4o-mini`
-- `gpt-4-turbo`, `gpt-4`
-- `o1-preview`, `o1-mini`
 - Any OpenAI model name
 
 ### Anthropic Claude
-- `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5` (latest)
-- `claude-3-5-sonnet`, `claude-3-opus`, `claude-3-sonnet`
+- `claude-opus-4-6`, `claude-sonnet-4-6` (latest)
+- `claude-haiku`, `claude-3-5-sonnet`
 - Any Claude model name (claude-* prefix)
 
 ### Google Gemini
-- `gemini-2.0-flash-exp`
-- `gemini-1.5-pro`, `gemini-1.5-flash`
+- `gemini-3.1-pro-preview`, `gemini-3.1-flash` (latest)
+- `gemini-2.5-pro`, `gemini-2.5-flash`
 - Any Google Gemini model name
 
 ## API Reference
 
 ### `AskLLM`
 
-#### `__init__(model: str)`
+#### `__init__(*, model, config=None, ...)`
 
 Initialize the LLM client.
 
-- `model`: Model name (provider auto-detected, required)
+**Parameters:**
+- `model` (str): Model name (provider auto-detected, required)
+- `config` (Config, optional): Config instance. If None, uses `Config.from_env()` for API keys
+- `min_delay_between_calls` (float, optional): Min delay between API calls in seconds (default: 1.0)
+- `max_retries` (int, optional): Max retries for rate limit errors (default: 3)
+- `request_timeout` (float, optional): Request timeout in seconds (default: 60)
+- `google_explicit_cache` (bool, optional): Enable Google context caching (default: True)
+- `google_inline_citations` (bool, optional): Inject `[cite: url]` markers for Gemini grounding (default: True)
 
 #### `ask(...)`
 
@@ -179,6 +199,7 @@ Generate a response from the LLM.
 **Parameters:**
 - `prompt` (str): User prompt/question
 - `system_instruct` (str, optional): System instruction
+- `messages` (list, optional): Conversation history
 - `max_tokens` (int, optional): Maximum tokens to generate
 - `temperature` (float, optional): Sampling temperature (0-2)
 - `top_p` (float, optional): Nucleus sampling parameter
@@ -187,10 +208,13 @@ Generate a response from the LLM.
 - `tools_schema` (list, optional): Tool/function calling schema (OpenAI, Anthropic, Google)
 - `response_format` (dict, optional): Response format specification
 - `execute_tool_cb` (callable, optional): Tool execution callback (OpenAI, Anthropic, Google)
-- `max_steps` (int, optional): Maximum tool-calling steps (OpenAI only, default: 24)
-- `max_effective_tool_steps` (int, optional): Maximum effective tool steps (OpenAI only, default: 12)
+- `tool_error_callback` (callable, optional): Callback when tool returns ok=False
+- `max_steps` (int, optional): Maximum tool-calling steps (default: 24)
+- `max_effective_tool_steps` (int, optional): Maximum effective tool steps (default: 12)
+- `force_tool_use` (bool, optional): Force at least one tool call when tools provided (default: False)
+- `stream` (bool, optional): When True, return `StreamResult` (default: False)
 
-**Returns:** `str` - Generated text response
+**Returns:** `AskResult` – Object with `.text` (str) and `.usage` (TokenUsage). When `stream=True`, returns `StreamResult` – async iterable of text chunks; `.usage` populated after iteration completes.
 
 **Raises:**
 - `ValidationError`: If prompt is empty or invalid parameters provided
@@ -202,8 +226,8 @@ Generate a response from the LLM.
 - `OPENAI_API_KEY`: OpenAI API key (required for OpenAI models)
 - `ANTHROPIC_API_KEY`: Anthropic API key (required for Claude models)
 - `GOOGLE_API_KEY`: Google API key (required for Google models)
-- `GOOGLE_EXPLICIT_CACHE`: Enable Google context caching (default: "1")
-- `GOOGLE_INLINE_CITATIONS`: Enable inline citations (default: "1")
+
+Google-specific options (`google_explicit_cache`, `google_inline_citations`) are passed as constructor params to `AskLLM`; see docstring.
 
 ## License
 
