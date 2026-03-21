@@ -559,7 +559,13 @@ class OpenAIResponsesClient:
                     raise APIError(f"Failed to generate final response: {e}") from e
 
         if not final_text.strip():
-            raise APIError("Empty response received from OpenAI API")
+            usage = TokenUsage(
+                input_tokens=total_input,
+                output_tokens=total_output,
+                total_tokens=total_input + total_output,
+                cached_tokens=total_cached if total_cached else None,
+            )
+            return "", usage
 
         usage = TokenUsage(
             input_tokens=total_input,

@@ -452,7 +452,13 @@ class AnthropicMessagesClient:
                     raise APIError(f"Failed to generate final response: {e}") from e
 
         if not final_text.strip():
-            raise APIError("Empty response received from Anthropic API")
+            usage = TokenUsage(
+                input_tokens=total_input,
+                output_tokens=total_output,
+                total_tokens=total_input + total_output,
+                cached_tokens=None,
+            )
+            return "", usage
 
         usage = TokenUsage(
             input_tokens=total_input,

@@ -4,7 +4,7 @@ from .exceptions import APIError, AskLLMError, ConfigurationError, RateLimitErro
 from .llm import AskLLM
 from .types import AskResult, StreamResult, TokenUsage
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "__version__",

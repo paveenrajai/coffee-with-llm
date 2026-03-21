@@ -505,7 +505,13 @@ class GoogleTextClient:
             text = last_nonempty_output or ""
 
         if not text.strip():
-            raise APIError("Empty response received from Google API")
+            usage = TokenUsage(
+                input_tokens=total_input,
+                output_tokens=total_output,
+                total_tokens=total_input + total_output,
+                cached_tokens=total_cached if total_cached else None,
+            )
+            return "", usage
 
         try:
             if self._google_inline_citations and last_resp:
