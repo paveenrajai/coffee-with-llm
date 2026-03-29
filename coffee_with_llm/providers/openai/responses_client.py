@@ -8,7 +8,13 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
-from ...types import TokenUsage
+from ...types import (
+    StreamStepBoundary,
+    StreamTextDelta,
+    StreamToolCallEnd,
+    StreamUsageSink,
+    TokenUsage,
+)
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -79,6 +85,30 @@ class OpenAIResponsesClient:
                 return {"format": {"type": "markdown"}}
             return {"format": {"type": "text"}}
 
+        return None
+
+    def _usage_from_stream_event(self, event: Any) -> Optional[TokenUsage]:
+        """Best-effort usage from a Responses stream event."""
+        try:
+            resp = getattr(event, "response", None)
+            if resp is not None:
+                u = self._extract_usage(resp)
+                if u:
+                    return u
+            usage = getattr(event, "usage", None)
+            if usage:
+                inp = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0)
+                out = getattr(usage, "output_tokens", 0)
+                total = getattr(usage, "total_tokens", None) or (inp + out)
+                cached = getattr(usage, "cached_tokens", None)
+                return TokenUsage(
+                    input_tokens=int(inp),
+                    output_tokens=int(out),
+                    total_tokens=int(total),
+                    cached_tokens=int(cached) if cached is not None else None,
+                )
+        except Exception:
+            pass
         return None
 
     @staticmethod
@@ -496,9 +526,7 @@ class OpenAIResponsesClient:
 
                 retry_message_fc = self._get_fc_error_retry_message(fc_outputs, tool_error_callback)
                 if retry_message_fc is not None:
-                    logger.info(
-                        "[TOOL_ERROR] New session (callback retry, output-array path)"
-                    )
+                    logger.info("[TOOL_ERROR] New session (callback retry, output-array path)")
                     # Revert output append to avoid orphaned function_calls
                     for _ in output_items:
                         input_list.pop()
@@ -580,25 +608,26 @@ class OpenAIResponsesClient:
         temperature: Optional[float] = None,
         instructions: Optional[str] = None,
         system_instruct: str = "",
-    ) -> AsyncIterator[Union[str, TokenUsage]]:
-        """Stream text chunks, then TokenUsage. No tools or response_format support."""
-        input_list: List[Dict[str, Any]] = []
-        if messages:
-            for msg in messages:
-                input_list.append(
-                    {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-                )
-        input_list.append({"role": "user", "content": prompt})
+        presence_penalty: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Any] = None,
+        execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        tool_error_callback: Optional[
+            Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]
+        ] = None,
+        max_steps: int = 16,
+        max_effective_tool_steps: int = 8,
+        force_tool_use: bool = False,
+        usage_sink: Optional[StreamUsageSink] = None,
+    ) -> AsyncIterator[Union[object, TokenUsage]]:
+        """Stream ``StreamEvent`` chunks, then terminal ``TokenUsage``."""
+        del temperature, force_tool_use  # Responses API parity with generate(); unused here
 
-        params: Dict[str, Any] = {"model": model, "input": input_list}
-        if max_tokens is not None:
-            params["max_output_tokens"] = max_tokens
-        if top_p is not None:
-            params["top_p"] = top_p
-        if instructions or system_instruct:
-            params["instructions"] = (instructions or system_instruct or "").strip() or None
-        if params.get("instructions") is None:
-            params.pop("instructions", None)
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty")
+        if not model or not model.strip():
+            raise ValueError("Model name cannot be empty")
 
         try:
             client_kwargs: Dict[str, Any] = {"api_key": self._api_key}
@@ -608,23 +637,260 @@ class OpenAIResponsesClient:
         except Exception as e:
             raise APIError(f"Failed to initialize OpenAI client: {e}") from e
 
+        input_list: List[Dict[str, Any]] = []
+        if messages:
+            for msg in messages:
+                input_list.append(
+                    {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+                )
+        input_list.append({"role": "user", "content": prompt})
+        base_input: List[Dict[str, Any]] = [dict(m) for m in input_list]
+
+        params: Dict[str, Any] = {"model": model, "input": input_list}
+        if max_tokens is not None:
+            params["max_output_tokens"] = max_tokens
+        if top_p is not None:
+            params["top_p"] = top_p
+        if presence_penalty is not None:
+            params["presence_penalty"] = presence_penalty
+        merged_instr = (instructions or system_instruct or "").strip() or None
+        if merged_instr:
+            params["instructions"] = merged_instr
+        if reasoning_effort:
+            params["reasoning"] = {"effort": reasoning_effort}
+
+        use_tools = bool(tools_schema and execute_tool_cb)
+        if tools_schema:
+            params["tools"] = tools_schema
+
+        text_format = self._parse_response_format(response_format)
+        if text_format:
+            params["text"] = text_format
+
+        total_input = 0
+        total_output = 0
+        total_cached: Optional[int] = 0
+        pending_resp: Optional[Any] = None
+        effective_steps = 0
+        consecutive_reasoning_only = 0
+
+        def apply_response_step_usage(resp: Any) -> None:
+            nonlocal total_input, total_output, total_cached
+            self._log_cache_usage(resp)
+            step_usage = self._extract_usage(resp)
+            if step_usage:
+                total_input += step_usage.input_tokens
+                total_output += step_usage.output_tokens
+                if step_usage.cached_tokens is not None:
+                    total_cached = (total_cached or 0) + step_usage.cached_tokens
+                if usage_sink is not None:
+                    usage_sink.replace_with(
+                        TokenUsage(
+                            total_input,
+                            total_output,
+                            total_input + total_output,
+                            total_cached if total_cached else None,
+                        )
+                    )
+
         try:
-            stream = client.responses.stream(**params)
-            async with stream as s:
-                async for event in s:
-                    event_type = getattr(event, "type", "") or ""
-                    if "output_text" in event_type and "delta" in event_type:
-                        delta = getattr(event, "delta", None) or getattr(event, "text", "")
-                        if delta:
-                            yield delta
-                final = s.get_final_response()
-                if hasattr(final, "__await__"):
-                    final = await final
-                usage = self._extract_usage(final)
-                if usage:
-                    yield usage
+            for step in range(max_steps):
+                if use_tools and step > 0:
+                    yield StreamStepBoundary(step)
+
+                if pending_resp is not None:
+                    resp = pending_resp
+                    pending_resp = None
+                    apply_response_step_usage(resp)
                 else:
-                    yield TokenUsage(0, 0, 0, None)
+                    stream = client.responses.stream(**params)
+                    resp_obj: Optional[Any] = None
+                    async with stream as s:
+                        try:
+                            async for event in s:
+                                uev = self._usage_from_stream_event(event)
+                                if uev is not None and usage_sink is not None:
+                                    usage_sink.merge(
+                                        uev.input_tokens, uev.output_tokens, uev.cached_tokens
+                                    )
+                                et = getattr(event, "type", "") or ""
+                                if "output_text" in et and "delta" in et:
+                                    delta = (
+                                        getattr(event, "delta", None)
+                                        or getattr(event, "text", "")
+                                        or ""
+                                    )
+                                    if delta:
+                                        yield StreamTextDelta(str(delta))
+                        finally:
+                            try:
+                                fr = s.get_final_response()
+                                if hasattr(fr, "__await__"):
+                                    fr = await fr
+                                resp_obj = fr
+                                apply_response_step_usage(resp_obj)
+                            except Exception as e:
+                                logger.debug(
+                                    "OpenAI get_final_response after stream close: %s",
+                                    e,
+                                    exc_info=True,
+                                )
+                                resp_obj = None
+                    resp = resp_obj
+                    if resp is None:
+                        break
+
+                if not use_tools:
+                    break
+
+                required_action = getattr(resp, "required_action", None)
+                ra_type = getattr(required_action, "type", None) if required_action else None
+                if ra_type == "submit_tool_outputs":
+                    submit = getattr(required_action, "submit_tool_outputs", None)
+                    tool_calls = getattr(submit, "tool_calls", []) if submit else []
+
+                    reasoning_text = self._extract_and_log_reasoning(resp, execute_tool_cb)
+                    outputs: List[Dict[str, Any]] = []
+                    had_non_reasoning_tool = False
+
+                    for tc in tool_calls:
+                        tc_id, name, args = self._parse_tool_call(tc)
+                        yield StreamToolCallEnd(
+                            id=str(tc_id or name or ""),
+                            name=str(name or ""),
+                            arguments=args,
+                        )
+                        result_payload = await self._execute_tool_with_context(
+                            name, args, reasoning_text, execute_tool_cb
+                        )
+                        if (name or "") != REASONING_LOG_TOOL_NAME:
+                            had_non_reasoning_tool = True
+                        outputs.append(
+                            {"tool_call_id": tc_id, "output": json.dumps(result_payload)}
+                        )
+
+                    retry_message = self._get_tool_error_retry_message(
+                        tool_calls, outputs, tool_error_callback
+                    )
+                    if retry_message is not None:
+                        new_input = base_input + [{"role": "user", "content": retry_message}]
+                        params["input"] = new_input
+                        input_list = list(new_input)
+                        pending_resp = await client.responses.create(**params)
+                        continue
+
+                    if outputs:
+                        try:
+                            sub_resp = await client.responses.submit_tool_outputs(
+                                response_id=getattr(resp, "id"),
+                                tool_outputs=outputs,
+                            )
+                            pending_resp = sub_resp
+                            resp = sub_resp
+                        except Exception as e:
+                            if is_rate_limit_error(e):
+                                raise
+                            raise APIError(f"Failed to submit tool outputs: {e}") from e
+                        for out in outputs:
+                            input_list.append(
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": out.get("tool_call_id"),
+                                    "output": out.get("output"),
+                                }
+                            )
+                        params["input"] = input_list
+
+                    if getattr(resp, "output_text", ""):
+                        break
+
+                    effective_steps, consecutive_reasoning_only = update_step_tracking(
+                        had_non_reasoning_tool,
+                        effective_steps,
+                        consecutive_reasoning_only,
+                        max_effective_tool_steps,
+                    )
+                    if should_break_loop(
+                        effective_steps, consecutive_reasoning_only, max_effective_tool_steps
+                    ):
+                        break
+                else:
+                    function_calls: List[Any] = []
+                    for item in getattr(resp, "output", []) or []:
+                        if getattr(item, "type", None) == "function_call":
+                            function_calls.append(item)
+
+                    if not function_calls:
+                        break
+
+                    reasoning_text = self._extract_and_log_reasoning(resp, execute_tool_cb)
+                    output_items = getattr(resp, "output", []) or []
+                    input_list += output_items
+                    had_non_reasoning_tool = False
+                    fc_outputs: List[Dict[str, Any]] = []
+
+                    for fc in function_calls:
+                        name = getattr(fc, "name", None)
+                        try:
+                            args = json.loads(getattr(fc, "arguments", "") or "{}")
+                        except Exception:
+                            args = {}
+                        if execute_tool_cb is None:
+                            continue
+                        call_id = str(
+                            getattr(fc, "call_id", None) or getattr(fc, "id", None) or name or ""
+                        )
+                        yield StreamToolCallEnd(
+                            id=call_id,
+                            name=str(name or ""),
+                            arguments=args,
+                        )
+                        result_payload = await self._execute_tool_with_context(
+                            name, args, reasoning_text, execute_tool_cb
+                        )
+                        fc_outputs.append({"name": name, "payload": result_payload})
+                        if (name or "") != REASONING_LOG_TOOL_NAME:
+                            had_non_reasoning_tool = True
+
+                    retry_message_fc = self._get_fc_error_retry_message(
+                        fc_outputs, tool_error_callback
+                    )
+                    if retry_message_fc is not None:
+                        for _ in output_items:
+                            input_list.pop()
+                        new_input = base_input + [{"role": "user", "content": retry_message_fc}]
+                        params["input"] = new_input
+                        pending_resp = await client.responses.create(**params)
+                        continue
+
+                    for fc, fco in zip(function_calls, fc_outputs):
+                        call_id = getattr(fc, "call_id", None) or getattr(fc, "id", None)
+                        input_list.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(fco["payload"]),
+                            }
+                        )
+                    params["input"] = input_list
+
+                    effective_steps, consecutive_reasoning_only = update_step_tracking(
+                        had_non_reasoning_tool,
+                        effective_steps,
+                        consecutive_reasoning_only,
+                        max_effective_tool_steps,
+                    )
+                    if should_break_loop(
+                        effective_steps, consecutive_reasoning_only, max_effective_tool_steps
+                    ):
+                        break
+
+            yield TokenUsage(
+                input_tokens=total_input,
+                output_tokens=total_output,
+                total_tokens=total_input + total_output,
+                cached_tokens=total_cached if total_cached else None,
+            )
         except Exception as e:
             if is_rate_limit_error(e):
                 raise

@@ -148,14 +148,25 @@ response = await llm.ask(
 ### Streaming
 
 ```python
+from coffee_with_llm import StreamTextDelta
+
 llm = AskLLM(model="gpt-5.4")
 result = await llm.ask(prompt="Explain recursion in programming.", stream=True)
 async for chunk in result:
-    print(chunk, end="", flush=True)
+    if isinstance(chunk, StreamTextDelta):
+        print(chunk.text, end="", flush=True)
 print(f"\nUsage: {result.usage.input_tokens} in, {result.usage.output_tokens} out")
 ```
 
-> **Note:** Streaming is not supported with `tools_schema` or `response_format`. `result.usage` is populated after iteration completes. Rate limits trigger retry before the first chunk.
+**Events:** Iteration yields `StreamTextDelta`, `StreamToolCallStart`, `StreamToolArgumentsDelta`, `StreamToolCallEnd`, and `StreamStepBoundary` (between tool rounds), then completes. Bare `str` from older mocks is accepted and normalized to `StreamTextDelta`.
+
+**Tools and schema:** `stream=True` works with `tools_schema` and `response_format` when the provider supports them; you must pass `execute_tool_cb` whenever `tools_schema` is set.
+
+**Gemini:** Streaming with custom tools uses function calling only (no Google Search grounding in the same streaming request).
+
+**Usage and cost:** `result.usage` (including `cost_usd`) is set when the stream finishes normally. If you stop early (`break`), call `await result.aclose()` so usage can be filled from the best-effort `StreamUsageSink` when the provider reported partial usage.
+
+Rate limits trigger retry before the first chunk.
 
 ## Supported Models
 
@@ -214,7 +225,7 @@ Generate a response from the LLM.
 - `force_tool_use` (bool, optional): Force at least one tool call when tools provided (default: False)
 - `stream` (bool, optional): When True, return `StreamResult` (default: False)
 
-**Returns:** `AskResult` – Object with `.text` (str) and `.usage` (TokenUsage). When `stream=True`, returns `StreamResult` – async iterable of text chunks; `.usage` populated after iteration completes.
+**Returns:** `AskResult` – Object with `.text` (str) and `.usage` (TokenUsage). When `stream=True`, returns `StreamResult` – async iterable of stream events (see Streaming above); `.usage` after completion or `aclose()`.
 
 **Raises:**
 - `ValidationError`: If prompt is empty or invalid parameters provided

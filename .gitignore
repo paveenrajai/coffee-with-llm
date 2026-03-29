@@ -25,6 +25,11 @@ venv/
 env/
 ENV/
 
+# Environment variables
+.env
+.env.*
+!**/.env.example
+
 # IDE
 .vscode/
 .idea/
@@ -37,6 +42,7 @@ ENV/
 .coverage
 htmlcov/
 .tox/
+temp-scripts/
 
 # Distribution
 dist/

@@ -10,7 +10,15 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
-from ...types import TokenUsage
+from ...types import (
+    StreamStepBoundary,
+    StreamTextDelta,
+    StreamToolArgumentsDelta,
+    StreamToolCallEnd,
+    StreamToolCallStart,
+    StreamUsageSink,
+    TokenUsage,
+)
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -57,6 +65,27 @@ def _convert_tools_to_anthropic(tools_schema: List[Dict[str, Any]]) -> List[Dict
                 }
             )
     return anthropic_tools
+
+
+def _output_format_from_response_format(response_format: Any) -> Optional[Dict[str, Any]]:
+    """Map unified json_schema response_format to Anthropic Messages ``output_format``."""
+    if not response_format or not isinstance(response_format, dict):
+        return None
+    if response_format.get("type") != "json_schema":
+        return None
+    js = response_format.get("json_schema") or {}
+    schema = js.get("schema")
+    if not schema:
+        return None
+    name = js.get("name", "response_schema")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name,
+            "schema": schema,
+            "strict": bool(js.get("strict", True)),
+        },
+    }
 
 
 class AnthropicMessagesClient:
@@ -279,6 +308,10 @@ class AnthropicMessagesClient:
                 params["tool_choice"] = {"type": "any"}
                 logger.info("[ANTHROPIC] tool_choice=any (force tool use)")
 
+        out_fmt = _output_format_from_response_format(response_format)
+        if out_fmt:
+            params["output_format"] = out_fmt
+
         logger.info(
             "[ANTHROPIC] Request params keys: %s (tool_choice=%s)",
             list(params.keys()),
@@ -473,22 +506,25 @@ class AnthropicMessagesClient:
         temperature: Optional[float] = None,
         instructions: Optional[str] = None,
         system_instruct: str = "",
-    ) -> AsyncIterator[Union[str, TokenUsage]]:
-        """Stream text chunks, then TokenUsage. No tools or response_format support."""
-        msgs = self._build_messages(prompt, messages)
-        system = (instructions or system_instruct or "").strip() or None
+        presence_penalty: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Any] = None,
+        execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        tool_error_callback: Optional[
+            Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]
+        ] = None,
+        max_steps: int = 16,
+        max_effective_tool_steps: int = 8,
+        force_tool_use: bool = False,
+        usage_sink: Optional[StreamUsageSink] = None,
+    ) -> AsyncIterator[Union[object, TokenUsage]]:
+        del presence_penalty, reasoning_effort  # not used on Anthropic Messages
 
-        params: Dict[str, Any] = {
-            "model": model,
-            "messages": msgs,
-            "max_tokens": max_tokens or 4096,
-        }
-        if system:
-            params["system"] = system
-        if temperature is not None:
-            params["temperature"] = temperature
-        if top_p is not None:
-            params["top_p"] = top_p
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty")
+        if not model or not model.strip():
+            raise ValueError("Model name cannot be empty")
 
         try:
             client_kwargs: Dict[str, Any] = {"api_key": self._api_key}
@@ -498,21 +534,204 @@ class AnthropicMessagesClient:
         except Exception as e:
             raise APIError(f"Failed to initialize Anthropic client: {e}") from e
 
+        anthropic_tools = _convert_tools_to_anthropic(tools_schema or [])
+        base_messages = self._build_messages(prompt, messages)
+        use_tools = bool(anthropic_tools and execute_tool_cb)
+
+        total_input = 0
+        total_output = 0
+        effective_steps = 0
+        consecutive_reasoning_only = 0
+        pending_resp: Optional[Any] = None
+
+        def apply_usage_from_message(message: Any) -> None:
+            """Accumulate Anthropic message.usage into totals and usage_sink."""
+            nonlocal total_input, total_output
+            usage = getattr(message, "usage", None)
+            if usage is None:
+                return
+            inp = getattr(usage, "input_tokens", 0) or 0
+            out = getattr(usage, "output_tokens", 0) or 0
+            total_input += inp
+            total_output += out
+            if usage_sink is not None:
+                usage_sink.replace_with(
+                    TokenUsage(
+                        total_input,
+                        total_output,
+                        total_input + total_output,
+                        None,
+                    )
+                )
+
         try:
-            async with client.messages.stream(**params) as stream:
-                async for event in stream:
-                    if getattr(event, "type", "") == "content_block_delta":
-                        delta = getattr(getattr(event, "delta", None), "text", "") or ""
-                        if delta:
-                            yield delta
-                final = await stream.get_final_message()
-                usage_obj = getattr(final, "usage", None)
-                if usage_obj:
-                    inp = getattr(usage_obj, "input_tokens", 0) or 0
-                    out = getattr(usage_obj, "output_tokens", 0) or 0
-                    yield TokenUsage(inp, out, inp + out, None)
+            for step in range(max_steps):
+                if use_tools and step > 0:
+                    yield StreamStepBoundary(step)
+
+                params: Dict[str, Any] = {
+                    "model": model,
+                    "max_tokens": max_tokens or 4096,
+                    "messages": base_messages,
+                }
+                system = (instructions or system_instruct or "").strip() or None
+                if system:
+                    params["system"] = system
+                if temperature is not None:
+                    params["temperature"] = temperature
+                if top_p is not None:
+                    params["top_p"] = top_p
+                if anthropic_tools:
+                    params["tools"] = anthropic_tools
+                    if force_tool_use:
+                        params["tool_choice"] = {"type": "any"}
+                out_fmt = _output_format_from_response_format(response_format)
+                if out_fmt:
+                    params["output_format"] = out_fmt
+
+                if pending_resp is not None:
+                    resp = pending_resp
+                    pending_resp = None
+                    apply_usage_from_message(resp)
                 else:
-                    yield TokenUsage(0, 0, 0, None)
+                    current_tool_id: Optional[str] = None
+                    resp_msg: Optional[Any] = None
+                    async with client.messages.stream(**params) as stream:
+                        try:
+                            async for event in stream:
+                                et = getattr(event, "type", "") or ""
+                                if et == "content_block_start":
+                                    block = getattr(event, "content_block", None)
+                                    btype = None
+                                    if block is not None:
+                                        btype = getattr(block, "type", None)
+                                    if btype == "tool_use":
+                                        current_tool_id = str(getattr(block, "id", "") or "")
+                                        yield StreamToolCallStart(
+                                            current_tool_id,
+                                            str(getattr(block, "name", "") or ""),
+                                        )
+                                elif et == "content_block_delta":
+                                    delta = getattr(event, "delta", None)
+                                    if delta is None:
+                                        continue
+                                    dt = getattr(delta, "type", None)
+                                    if dt == "text_delta":
+                                        t = getattr(delta, "text", "") or ""
+                                        if t:
+                                            yield StreamTextDelta(t)
+                                    elif dt == "input_json_delta" and current_tool_id:
+                                        frag = getattr(delta, "partial_json", "") or ""
+                                        if frag:
+                                            yield StreamToolArgumentsDelta(current_tool_id, frag)
+                                elif et == "message_delta" and usage_sink is not None:
+                                    u = getattr(event, "usage", None)
+                                    if u is not None:
+                                        usage_sink.merge(
+                                            getattr(u, "input_tokens", 0) or 0,
+                                            getattr(u, "output_tokens", 0) or 0,
+                                            None,
+                                        )
+                        finally:
+                            try:
+                                resp_msg = await stream.get_final_message()
+                            except Exception as e:
+                                logger.debug(
+                                    "Anthropic get_final_message after stream close: %s",
+                                    e,
+                                    exc_info=True,
+                                )
+                                resp_msg = None
+                            if resp_msg is not None:
+                                apply_usage_from_message(resp_msg)
+                    resp = resp_msg
+                    if resp is None:
+                        break
+
+                content = getattr(resp, "content", []) or []
+                stop_reason = getattr(resp, "stop_reason", None) or "end_turn"
+
+                if not use_tools:
+                    break
+
+                if stop_reason != "tool_use":
+                    break
+
+                tool_uses = [
+                    self._parse_tool_use(block)
+                    for block in content
+                    if (isinstance(block, dict) and block.get("type") == "tool_use")
+                    or (getattr(block, "type", None) == "tool_use")
+                ]
+                if not tool_uses:
+                    break
+
+                for tu in tool_uses:
+                    yield StreamToolCallEnd(
+                        id=str(tu["id"]),
+                        name=str(tu["name"]),
+                        arguments=dict(tu["input"]),
+                    )
+
+                output_payloads: List[Dict[str, Any]] = []
+                had_non_reasoning_tool = False
+                for tu in tool_uses:
+                    result_payload = await self._execute_tool(
+                        tu["name"], tu["input"], execute_tool_cb
+                    )
+                    output_payloads.append(
+                        {
+                            "tool_use_id": tu["id"],
+                            "name": tu["name"],
+                            "payload": result_payload,
+                        }
+                    )
+                    if tu["name"] and "reasoning" not in tu["name"].lower():
+                        had_non_reasoning_tool = True
+
+                retry_message = self._get_tool_error_retry_message(
+                    output_payloads, tool_error_callback
+                )
+                if retry_message is not None:
+                    base_messages = base_messages + [{"role": "user", "content": retry_message}]
+                    params["messages"] = base_messages
+                    pending_resp = await client.messages.create(**params)
+                    continue
+
+                tool_results: List[Dict[str, Any]] = []
+                for out in output_payloads:
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": out["tool_use_id"],
+                            "content": json.dumps(out["payload"]),
+                            "is_error": not out["payload"].get("ok", False),
+                        }
+                    )
+
+                new_messages = list(base_messages)
+                assistant_content = self._blocks_to_api_format(content)
+                new_messages.append({"role": "assistant", "content": assistant_content})
+                new_messages.append({"role": "user", "content": tool_results})
+                base_messages = new_messages
+
+                effective_steps, consecutive_reasoning_only = update_step_tracking(
+                    had_non_reasoning_tool,
+                    effective_steps,
+                    consecutive_reasoning_only,
+                    max_effective_tool_steps,
+                )
+                if should_break_loop(
+                    effective_steps, consecutive_reasoning_only, max_effective_tool_steps
+                ):
+                    break
+
+            yield TokenUsage(
+                input_tokens=total_input,
+                output_tokens=total_output,
+                total_tokens=total_input + total_output,
+                cached_tokens=None,
+            )
         except Exception as e:
             if is_rate_limit_error(e):
                 raise

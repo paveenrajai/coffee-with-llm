@@ -14,7 +14,7 @@ from typing import (
     runtime_checkable,
 )
 
-from ..types import TokenUsage
+from ..types import StreamUsageSink, TokenUsage
 
 
 @runtime_checkable
@@ -58,7 +58,22 @@ class ProviderProtocol(Protocol):
         temperature: Optional[float] = None,
         instructions: Optional[str] = None,
         system_instruct: str = "",
-    ) -> AsyncIterator[Union[str, TokenUsage]]:
-        """Stream text chunks, then TokenUsage as final yield. No tools or response_format.
-        Implement as async generator; calling it returns the iterator directly."""
+        presence_penalty: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        tool_error_callback: Optional[
+            Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]
+        ] = None,
+        max_steps: int = 24,
+        max_effective_tool_steps: int = 12,
+        force_tool_use: bool = False,
+        usage_sink: Optional[StreamUsageSink] = None,
+    ) -> AsyncIterator[Union[object, TokenUsage]]:
+        """Stream :class:`~coffee_with_llm.types.StreamEvent` chunks, then terminal ``TokenUsage``.
+
+        Pass ``usage_sink`` for best-effort usage on early ``aclose``. Implement as async
+        generator; calling it returns the iterator directly.
+        """
         ...
