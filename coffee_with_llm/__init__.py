@@ -14,11 +14,7 @@ from .types import (
     TokenUsage,
 )
 
-<<<<<<< Updated upstream
-__version__ = "0.1.0"
-=======
 __version__ = "0.2.0"
->>>>>>> Stashed changes
 
 __all__ = [
     "__version__",
