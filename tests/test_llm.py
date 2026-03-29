@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coffee_with_llm import AskLLM, TokenUsage
+from coffee_with_llm import AskLLM, StreamTextDelta, TokenUsage
 from coffee_with_llm.exceptions import APIError, ConfigurationError, ValidationError
 
 
@@ -258,17 +258,17 @@ class TestAskLLMStreaming:
         chunks = []
         async for c in result:
             chunks.append(c)
-        assert chunks == ["Hello ", "world!"]
+        assert chunks == [StreamTextDelta("Hello "), StreamTextDelta("world!")]
         assert result.usage is not None
         assert result.usage.input_tokens == 10
         assert result.usage.output_tokens == 5
 
     @pytest.mark.asyncio
-    async def test_stream_with_tools_raises(self, mock_openai_api_key):
-        """stream=True with tools_schema raises ValidationError."""
+    async def test_stream_tools_requires_execute_cb(self, mock_openai_api_key):
+        """stream=True with tools_schema requires execute_tool_cb."""
         with patch("openai.AsyncOpenAI"):
             llm = AskLLM(model="gpt-4o-mini")
-            with pytest.raises(ValidationError, match="stream=True is not supported"):
+            with pytest.raises(ValidationError, match="execute_tool_cb is required"):
                 await llm.ask(
                     prompt="hi",
                     stream=True,
@@ -278,13 +278,27 @@ class TestAskLLMStreaming:
                 )
 
     @pytest.mark.asyncio
-    async def test_stream_with_response_format_raises(self, mock_openai_api_key):
-        """stream=True with response_format raises ValidationError."""
+    async def test_stream_with_tools_and_response_format(self, mock_openai_api_key):
+        """stream=True allows tools_schema and response_format when cb is provided."""
+
+        async def mock_stream(*args, **kwargs):
+            yield StreamTextDelta("ok")
+            yield TokenUsage(1, 2, 3, None)
+
         with patch("openai.AsyncOpenAI"):
             llm = AskLLM(model="gpt-4o-mini")
-            with pytest.raises(ValidationError, match="stream=True is not supported"):
-                await llm.ask(
-                    prompt="hi",
-                    stream=True,
-                    response_format={"type": "json_object"},
-                )
+            llm._client.generate_stream = mock_stream
+
+        result = await llm.ask(
+            prompt="hi",
+            stream=True,
+            tools_schema=[{"type": "function", "function": {"name": "x", "parameters": {}}}],
+            execute_tool_cb=lambda n, a: {"ok": True, "result": {}},
+            response_format={"type": "json_object"},
+        )
+        chunks = []
+        async for c in result:
+            chunks.append(c)
+        assert len(chunks) == 1
+        assert isinstance(chunks[0], StreamTextDelta)
+        assert chunks[0].text == "ok"

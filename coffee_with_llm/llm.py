@@ -10,7 +10,7 @@ from .cost import estimate_cost
 from .exceptions import APIError, ConfigurationError, RateLimitError, ValidationError
 from .providers.registry import get_provider
 from .rate_limit import is_rate_limit_error, with_retry
-from .types import AskResult, StreamResult, TokenUsage
+from .types import AskResult, StreamResult, StreamUsageSink, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -130,8 +130,9 @@ class AskLLM:
             max_effective_tool_steps: Maximum effective tool steps (OpenAI, Anthropic, Google)
             force_tool_use: When True, force at least one tool call (Anthropic tool_choice=any).
                 Prevents text-only responses when tools are provided.
-            stream: When True, return StreamResult (async iterable; usage after iteration).
-                Not supported with tools_schema or response_format.
+            stream: When True, return StreamResult (async iterable of stream events; usage
+                after iteration or aclose). Supports tools_schema and response_format when
+                the provider allows; requires execute_tool_cb if tools_schema is set.
 
         Returns:
             AskResult with text and token usage, or StreamResult when stream=True.
@@ -158,10 +159,8 @@ class AskLLM:
         if max_effective_tool_steps <= 0:
             raise ValidationError("max_effective_tool_steps must be positive")
 
-        if stream and (tools_schema or response_format):
-            raise ValidationError(
-                "stream=True is not supported with tools_schema or response_format"
-            )
+        if stream and tools_schema and not execute_tool_cb:
+            raise ValidationError("execute_tool_cb is required when stream=True with tools_schema")
 
         # Rate limiting: wait if needed before making API call
         await self._wait_if_needed()
@@ -174,6 +173,15 @@ class AskLLM:
                 temperature=temperature,
                 top_p=top_p,
                 system_instruct=system_instruct,
+                presence_penalty=presence_penalty,
+                reasoning_effort=reasoning_effort,
+                tools_schema=tools_schema,
+                response_format=response_format,
+                execute_tool_cb=execute_tool_cb,
+                tool_error_callback=tool_error_callback,
+                max_steps=max_steps,
+                max_effective_tool_steps=max_effective_tool_steps,
+                force_tool_use=force_tool_use,
             )
 
         async def _generate() -> AskResult:
@@ -230,10 +238,23 @@ class AskLLM:
         temperature: Optional[float],
         top_p: Optional[float],
         system_instruct: str,
+        presence_penalty: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        tool_error_callback: Optional[
+            Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]
+        ] = None,
+        max_steps: int = 24,
+        max_effective_tool_steps: int = 12,
+        force_tool_use: bool = False,
     ) -> StreamResult:
-        """Stream text chunks with usage and rate-limit retry."""
+        """Stream events with usage and rate-limit retry."""
 
-        def create_stream() -> AsyncIterator[Union[str, TokenUsage]]:
+        usage_sink = StreamUsageSink()
+
+        def create_stream() -> AsyncIterator[object]:
             return self._client.generate_stream(
                 prompt=prompt,
                 model=self._model,
@@ -243,12 +264,23 @@ class AskLLM:
                 temperature=temperature,
                 instructions=system_instruct if system_instruct else None,
                 system_instruct=system_instruct or "",
+                presence_penalty=presence_penalty,
+                reasoning_effort=reasoning_effort,
+                tools_schema=tools_schema,
+                response_format=response_format,
+                execute_tool_cb=execute_tool_cb,
+                tool_error_callback=tool_error_callback,
+                max_steps=max_steps,
+                max_effective_tool_steps=max_effective_tool_steps,
+                force_tool_use=force_tool_use,
+                usage_sink=usage_sink,
             )
 
         return StreamResult(
             stream_factory=create_stream,
             usage_callback=lambda u: self._usage_with_cost(u),
             max_retries=self._max_retries,
+            usage_sink=usage_sink,
         )
 
     def _usage_with_cost(self, usage: TokenUsage) -> TokenUsage:

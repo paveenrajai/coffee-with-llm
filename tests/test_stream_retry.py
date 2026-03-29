@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from coffee_with_llm import AskLLM, TokenUsage
+from coffee_with_llm import AskLLM, StreamTextDelta, TokenUsage
 
 
 class TestStreamRetry:
@@ -32,7 +32,7 @@ class TestStreamRetry:
         chunks = []
         async for c in result:
             chunks.append(c)
-        assert chunks == ["Hello ", "world!"]
+        assert chunks == [StreamTextDelta("Hello "), StreamTextDelta("world!")]
         assert result.usage is not None
         assert result.usage.input_tokens == 10
         assert call_count == 2

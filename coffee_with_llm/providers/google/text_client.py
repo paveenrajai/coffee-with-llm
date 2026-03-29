@@ -14,7 +14,13 @@ from google.genai import types
 from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
-from ...types import TokenUsage
+from ...types import (
+    StreamStepBoundary,
+    StreamTextDelta,
+    StreamToolCallEnd,
+    StreamUsageSink,
+    TokenUsage,
+)
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -31,6 +37,34 @@ logger = logging.getLogger(__name__)
 
 MAX_CACHED_CONTEXTS = 10
 CONTEXT_TTL_SECONDS = 3600  # 1 hour
+
+
+def _google_stream_chunk_to_usage_sink(
+    chunk: Any,
+    usage_sink: Optional[StreamUsageSink],
+    base_input: int,
+    base_output: int,
+    base_cached: Optional[int],
+) -> None:
+    """Best-effort usage from a stream chunk (Gemini often fills this on the last chunks)."""
+    um = getattr(chunk, "usage_metadata", None)
+    if um is None or usage_sink is None:
+        return
+    pi = int(getattr(um, "prompt_token_count", 0) or 0)
+    po = int(getattr(um, "candidates_token_count", 0) or 0)
+    cc = getattr(um, "cached_content_token_count", None)
+    cached_tokens: Optional[int] = base_cached
+    if cc is not None:
+        cached_tokens = (base_cached or 0) + int(cc)
+    usage_sink.replace_with(
+        TokenUsage(
+            base_input + pi,
+            base_output + po,
+            base_input + pi + base_output + po,
+            cached_tokens if cached_tokens else None,
+        )
+    )
+
 
 # Gemini API rejects these JSON Schema keys; strip them when converting.
 _GEMINI_REJECTED_KEYS = frozenset(
@@ -540,50 +574,180 @@ class GoogleTextClient:
         temperature: Optional[float] = None,
         instructions: Optional[str] = None,
         system_instruct: str = "",
-    ) -> AsyncIterator[Union[str, TokenUsage]]:
-        """Stream text chunks, then TokenUsage. No tools or response_format support."""
-        system_instruct = system_instruct or (instructions or "")
-        contents: List[Any] = []
-        if messages:
-            for msg in messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                google_role = "model" if role == "assistant" else "user"
-                contents.append({"role": google_role, "parts": [{"text": content}]})
-            contents.append({"role": "user", "parts": [{"text": prompt}]})
-        else:
-            merged = f"{system_instruct}\n\n{prompt}".strip() if system_instruct.strip() else prompt
-            contents.append(merged)
+        presence_penalty: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        tool_error_callback: Optional[
+            Callable[[str, Optional[str], Dict[str, Any]], Optional[str]]
+        ] = None,
+        max_steps: int = 16,
+        max_effective_tool_steps: int = 8,
+        force_tool_use: bool = False,
+        usage_sink: Optional[StreamUsageSink] = None,
+    ) -> AsyncIterator[Union[object, TokenUsage]]:
+        del presence_penalty, reasoning_effort, force_tool_use
 
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty")
+        if not model or not model.strip():
+            raise ValueError("Model name cannot be empty")
+
+        system_instruct = system_instruct or (instructions or "")
+        use_tools = bool(tools_schema and execute_tool_cb)
+        # Streaming with custom tools: never combine Google Search (plan).
+        include_search = not use_tools
+
+        cached_context_name = await self._get_or_create_cached_context(system_instruct, model)
+
+        def build_initial_contents() -> List[Any]:
+            return self._build_initial_contents(
+                cached_context_name, messages, prompt, system_instruct
+            )
+
+        contents = build_initial_contents()
         config = self._build_config_dict(
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
-            response_format=None,
-            tools_schema=None,
-            include_google_search=False,
+            response_format=response_format,
+            tools_schema=tools_schema if use_tools else None,
+            include_google_search=include_search,
         )
 
+        request_kwargs: Dict[str, Any] = {
+            "model": model,
+            "contents": contents,
+            "config": config,
+        }
+        if cached_context_name:
+            request_kwargs["cached_content"] = cached_context_name
+
+        total_input = 0
+        total_output = 0
+        total_cached: Optional[int] = None
+        effective_steps = 0
+        consecutive_reasoning_only = 0
+
         try:
-            stream = self._client.aio.models.generate_content_stream(
-                model=model,
-                contents=contents,
-                config=config,
+            for step in range(max_steps):
+                if use_tools and step > 0:
+                    yield StreamStepBoundary(step)
+
+                # google-genai: this API returns a coroutine whose result is the async iterator.
+                stream = await self._client.aio.models.generate_content_stream(**request_kwargs)
+                last_chunk: Optional[Any] = None
+                try:
+                    async for chunk in stream:
+                        last_chunk = chunk
+                        text = getattr(chunk, "text", None) or ""
+                        if text:
+                            yield StreamTextDelta(text)
+                        _google_stream_chunk_to_usage_sink(
+                            chunk, usage_sink, total_input, total_output, total_cached
+                        )
+                finally:
+                    # Drain remainder for usage_metadata only (consumer may have stopped early).
+                    try:
+                        async for chunk in stream:
+                            last_chunk = chunk
+                            _google_stream_chunk_to_usage_sink(
+                                chunk, usage_sink, total_input, total_output, total_cached
+                            )
+                    except Exception as e:
+                        logger.debug("Google stream drain for usage: %s", e, exc_info=True)
+
+                if last_chunk is None:
+                    break
+
+                um = getattr(last_chunk, "usage_metadata", None)
+                if um:
+                    total_input += getattr(um, "prompt_token_count", 0) or 0
+                    total_output += getattr(um, "candidates_token_count", 0) or 0
+                    cc = getattr(um, "cached_content_token_count", None)
+                    if cc is not None:
+                        total_cached = (total_cached or 0) + int(cc)
+                    if usage_sink is not None:
+                        usage_sink.replace_with(
+                            TokenUsage(
+                                total_input,
+                                total_output,
+                                total_input + total_output,
+                                total_cached if total_cached else None,
+                            )
+                        )
+
+                if not use_tools:
+                    break
+
+                function_calls = self._extract_function_calls(last_chunk)
+                if not function_calls:
+                    break
+
+                output_payloads: List[Dict[str, Any]] = []
+                had_non_reasoning_tool = False
+                for fc in function_calls:
+                    name = fc.get("name")
+                    args = fc.get("args") or {}
+                    yield StreamToolCallEnd(
+                        id=str(name or ""),
+                        name=str(name or ""),
+                        arguments=dict(args) if isinstance(args, dict) else {},
+                    )
+                    result_payload = await self._execute_tool(name, args, execute_tool_cb)
+                    output_payloads.append({"name": name, "payload": result_payload})
+                    if name and "reasoning" not in (name or "").lower():
+                        had_non_reasoning_tool = True
+
+                retry_message = self._get_tool_error_retry_message(
+                    output_payloads, tool_error_callback
+                )
+                if retry_message is not None:
+                    contents = build_initial_contents() + [
+                        {"role": "user", "parts": [{"text": retry_message}]}
+                    ]
+                    request_kwargs["contents"] = contents
+                    continue
+
+                model_content = (
+                    getattr(last_chunk.candidates[0], "content", None)
+                    if getattr(last_chunk, "candidates", None)
+                    else None
+                )
+                if model_content is not None:
+                    contents.append(model_content)
+
+                response_parts: List[Any] = []
+                for out in output_payloads:
+                    response_parts.append(
+                        types.Part.from_function_response(
+                            name=out["name"],
+                            response=out["payload"],
+                        )
+                    )
+                contents.append(types.Content(role="user", parts=response_parts))
+                request_kwargs["contents"] = contents
+
+                effective_steps, consecutive_reasoning_only = update_step_tracking(
+                    had_non_reasoning_tool,
+                    effective_steps,
+                    consecutive_reasoning_only,
+                    max_effective_tool_steps,
+                )
+                if should_break_loop(
+                    effective_steps,
+                    consecutive_reasoning_only,
+                    max_effective_tool_steps,
+                ):
+                    break
+
+            yield TokenUsage(
+                input_tokens=total_input,
+                output_tokens=total_output,
+                total_tokens=total_input + total_output,
+                cached_tokens=total_cached if total_cached else None,
             )
-            last_chunk = None
-            async for chunk in stream:
-                last_chunk = chunk
-                text = getattr(chunk, "text", None) or ""
-                if text:
-                    yield text
-            um = getattr(last_chunk, "usage_metadata", None) if last_chunk else None
-            if um:
-                inp = getattr(um, "prompt_token_count", 0) or 0
-                out = getattr(um, "candidates_token_count", 0) or 0
-                cached = getattr(um, "cached_content_token_count", None)
-                yield TokenUsage(inp, out, inp + out, int(cached) if cached is not None else None)
-            else:
-                yield TokenUsage(0, 0, 0, None)
         except Exception as e:
             if is_rate_limit_error(e):
                 raise

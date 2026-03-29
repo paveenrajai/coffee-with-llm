@@ -104,26 +104,34 @@ async def retry_stream(
     """Wrap async stream, retrying on rate limit before each chunk. Yields items from stream."""
     stream = stream_factory()
     it = stream.__aiter__()
-    while True:
-        for attempt in range(max_retries):
+    try:
+        while True:
+            for attempt in range(max_retries):
+                try:
+                    item = await it.__anext__()
+                    yield item
+                    break
+                except StopAsyncIteration:
+                    return
+                except Exception as e:
+                    if is_rate_limit_error(e) and attempt < max_retries - 1:
+                        backoff = RATE_LIMIT_BACKOFF_BASE**attempt
+                        logger.warning(
+                            "Stream rate limit (attempt %d/%d), backing off %ds: %s",
+                            attempt + 1,
+                            max_retries,
+                            backoff,
+                            e,
+                        )
+                        await asyncio.sleep(backoff)
+                        stream = stream_factory()
+                        it = stream.__aiter__()
+                        continue
+                    raise
+    finally:
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
             try:
-                item = await it.__anext__()
-                yield item
-                break
-            except StopAsyncIteration:
-                return
-            except Exception as e:
-                if is_rate_limit_error(e) and attempt < max_retries - 1:
-                    backoff = RATE_LIMIT_BACKOFF_BASE**attempt
-                    logger.warning(
-                        "Stream rate limit (attempt %d/%d), backing off %ds: %s",
-                        attempt + 1,
-                        max_retries,
-                        backoff,
-                        e,
-                    )
-                    await asyncio.sleep(backoff)
-                    stream = stream_factory()
-                    it = stream.__aiter__()
-                    continue
-                raise
+                await aclose()
+            except Exception:
+                pass
