@@ -39,6 +39,17 @@ class TestAskLLMInitialization:
             llm = AskLLM(model="google-gemini-pro")
             assert llm._model == "google-gemini-pro"
 
+    def test_init_provider_slash_stores_api_model_only(self, mock_google_api_key):
+        """provider/model stores only the API model id."""
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            llm = AskLLM(model="google/gemma-2-9b-it")
+            assert llm._model == "gemma-2-9b-it"
+
+    def test_init_empty_after_provider_slash_raises(self, mock_google_api_key):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            with pytest.raises(ValidationError, match="after provider prefix"):
+                AskLLM(model="google/")
+
     def test_init_with_missing_openai_key(self):
         """Test initialization fails when OpenAI API key is missing."""
         with patch.dict("os.environ", {}, clear=True):

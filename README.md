@@ -4,7 +4,7 @@ A model-agnostic Python library providing a unified API for OpenAI, Anthropic Cl
 
 ## Features
 
-- **Model-agnostic**: Automatically selects the appropriate provider based on model name
+- **Model-agnostic**: Picks the provider from the model id, or from an explicit `provider/model` prefix (see below)
 - **Unified API**: Same interface for OpenAI, Anthropic Claude, and Google Gemini
 - **Tool Calling**: Full support for OpenAI's tool calling with multi-step execution
 - **Structured Outputs**: Support for JSON schema and response formatting
@@ -43,8 +43,30 @@ async def main():
     )
     print(response.text)
 
+    # Google Gemma (or any Google API model id): prefix selects Google; only the part
+    # after "/" is sent to the API
+    llm_gemma = AskLLM(model="google/gemma-2-9b-it")
+    response = await llm_gemma.ask(prompt="Say hi in five words or fewer.")
+    print(response.text)
+
 asyncio.run(main())
 ```
+
+## Provider prefix (`provider/model`)
+
+You can force the provider and pass the **exact API model id** with a single slash:
+
+| Prefix       | Provider  | Example |
+|-------------|-----------|---------|
+| `google/`   | Google    | `google/gemma-2-9b-it` |
+| `gemini/`   | Google    | `gemini/gemini-2.5-flash` |
+| `openai/`   | OpenAI    | `openai/gpt-4o-mini` |
+| `anthropic/`| Anthropic | `anthropic/claude-sonnet-4-6` |
+| `claude/`   | Anthropic | `claude/claude-sonnet-4-6` |
+
+Only the segment **after** the first `/` is sent to the provider API (e.g. `google/gemma-2-9b-it` → API model `gemma-2-9b-it`). If the prefix is missing or unknown, the whole string is used for both routing and the API (legacy behavior: ids like `gpt-4o-mini`, `claude-…`, `gemini-…`, `google-…` still auto-route).
+
+An empty id after the prefix (e.g. `google/`) is rejected with `ValidationError`.
 
 ## Configuration
 
@@ -181,10 +203,11 @@ Rate limits trigger retry before the first chunk.
 - `claude-haiku`, `claude-3-5-sonnet`
 - Any Claude model name (claude-* prefix)
 
-### Google Gemini
+### Google (Gemini, Gemma, …)
 - `gemini-3.1-pro-preview`, `gemini-3.1-flash` (latest)
 - `gemini-2.5-pro`, `gemini-2.5-flash`
-- Any Google Gemini model name
+- Any Gemini id the API accepts (`gemini-…` or `google-…` still auto-routes to Google)
+- **Gemma** and other non-`gemini` Google ids: use the prefix form, e.g. `google/gemma-2-9b-it`, so routing hits Google and the API receives `gemma-2-9b-it`
 
 ## API Reference
 
@@ -195,7 +218,7 @@ Rate limits trigger retry before the first chunk.
 Initialize the LLM client.
 
 **Parameters:**
-- `model` (str): Model name (provider auto-detected, required)
+- `model` (str): Model name (required). Optional `provider/model` form (see [Provider prefix](#provider-prefix-providermodel)); otherwise provider is inferred from the id (`gpt-…`, `claude-…`, `gemini-…`, `google-…`, etc.).
 - `config` (Config, optional): Config instance. If None, uses `Config.from_env()` for API keys
 - `min_delay_between_calls` (float, optional): Min delay between API calls in seconds (default: 1.0)
 - `max_retries` (int, optional): Max retries for rate limit errors (default: 3)

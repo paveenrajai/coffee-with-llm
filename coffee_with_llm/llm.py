@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 from .config import Config
 from .cost import estimate_cost
 from .exceptions import APIError, ConfigurationError, RateLimitError, ValidationError
-from .providers.registry import get_provider
+from .providers.registry import get_provider, split_provider_model
 from .rate_limit import is_rate_limit_error, with_retry
 from .types import AskResult, StreamResult, StreamUsageSink, TokenUsage
 
@@ -51,8 +51,10 @@ class AskLLM:
         Initialize AskLLM with a model.
 
         Args:
-            model: Model name (e.g., "gpt-5.4", "claude-sonnet-4-6", "gemini-3.1-pro-preview")
-                 Provider is auto-detected based on model prefix.
+            model: Model name, optionally ``provider/model`` (e.g. ``google/gemma-2-9b-it``,
+                 ``openai/gpt-4o-mini``, ``anthropic/claude-sonnet-4-6``). The segment after
+                 ``/`` is sent to the API; the provider segment selects the client. Legacy
+                 ids without ``/`` still work (e.g. ``gpt-5.4``, ``claude-sonnet-4-6``).
                  Must be provided.
             config: Config instance. If None, uses Config.from_env() (API keys from env).
             min_delay_between_calls: Min delay in seconds between API calls (default: 1.0)
@@ -65,10 +67,15 @@ class AskLLM:
             ValidationError: If model is not provided.
             ConfigurationError: If API keys are missing or client initialization fails.
         """
-        if not model:
+        if not model or not str(model).strip():
             raise ValidationError("Model name is required")
 
-        self._model = model
+        model_str = str(model).strip()
+        api_model, _ = split_provider_model(model_str)
+        if not api_model:
+            raise ValidationError("Model name is required")
+
+        self._model = api_model
         self._min_delay = min_delay_between_calls
         self._max_retries = max_retries
         self._last_call_time: Optional[float] = None
@@ -78,14 +85,16 @@ class AskLLM:
 
         try:
             self._client = get_provider(
-                model,
+                model_str,
                 config=cfg,
                 request_timeout=self._request_timeout,
                 google_explicit_cache=google_explicit_cache,
                 google_inline_citations=google_inline_citations,
             )
         except Exception as e:
-            raise ConfigurationError(f"Failed to initialize client for model '{model}': {e}") from e
+            raise ConfigurationError(
+                f"Failed to initialize client for model '{model_str}': {e}"
+            ) from e
 
     async def ask(
         self,

@@ -1,6 +1,6 @@
 [project]
 name = "coffee_with_llm"
-version = "0.2.0"
+version = "0.3.0"
 description = "A model-agnostic Python library with a unified API for multiple LLM providers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -64,6 +64,10 @@ disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
 module = ["anthropic.*", "openai.*", "google.genai.*", "google.generativeai.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pytest", "pytest.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
