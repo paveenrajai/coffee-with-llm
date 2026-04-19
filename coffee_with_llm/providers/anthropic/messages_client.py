@@ -19,6 +19,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
+from .._reasoning import thinking_budget_tokens
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -65,6 +66,30 @@ def _convert_tools_to_anthropic(tools_schema: List[Dict[str, Any]]) -> List[Dict
                 }
             )
     return anthropic_tools
+
+
+def _apply_thinking(params: Dict[str, Any], reasoning_effort: Optional[str]) -> None:
+    """Translate ``reasoning_effort`` into Anthropic ``thinking`` config, in place.
+
+    Anthropic constraints when extended thinking is enabled:
+      * ``temperature`` must be 1 (we force it).
+      * ``top_p`` / ``top_k`` are not allowed (we strip them).
+      * ``max_tokens`` must exceed ``budget_tokens`` (we widen if needed,
+        leaving ~1024 tokens of room for the visible answer).
+
+    No-op when ``reasoning_effort`` is unset or unrecognized.
+    """
+    budget = thinking_budget_tokens(reasoning_effort)
+    if budget is None:
+        return
+    params["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    params["temperature"] = 1
+    params.pop("top_p", None)
+    params.pop("top_k", None)
+    current_max = params.get("max_tokens") or 0
+    required = budget + 1024
+    if current_max < required:
+        params["max_tokens"] = required
 
 
 def _output_format_from_response_format(response_format: Any) -> Optional[Dict[str, Any]]:
@@ -312,6 +337,8 @@ class AnthropicMessagesClient:
         if out_fmt:
             params["output_format"] = out_fmt
 
+        _apply_thinking(params, reasoning_effort)
+
         logger.info(
             "[ANTHROPIC] Request params keys: %s (tool_choice=%s)",
             list(params.keys()),
@@ -519,7 +546,7 @@ class AnthropicMessagesClient:
         force_tool_use: bool = False,
         usage_sink: Optional[StreamUsageSink] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
-        del presence_penalty, reasoning_effort  # not used on Anthropic Messages
+        del presence_penalty  # Anthropic Messages has no equivalent
 
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
@@ -588,6 +615,8 @@ class AnthropicMessagesClient:
                 out_fmt = _output_format_from_response_format(response_format)
                 if out_fmt:
                     params["output_format"] = out_fmt
+
+                _apply_thinking(params, reasoning_effort)
 
                 if pending_resp is not None:
                     resp = pending_resp

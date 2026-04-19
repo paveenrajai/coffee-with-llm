@@ -10,7 +10,7 @@ A model-agnostic Python library providing a unified API for OpenAI, Anthropic Cl
 - **Structured Outputs**: Support for JSON schema and response formatting
 - **Caching**: Built-in prompt caching for both providers
 - **Citations**: Automatic citation injection for Google Gemini responses
-- **Reasoning**: Support for OpenAI's reasoning models with effort control
+- **Extended thinking**: Single `reasoning_effort` knob (`"low" | "medium" | "high"`) translates to OpenAI `reasoning.effort`, Anthropic `thinking.budget_tokens`, and Google `thinking_config`
 
 ## Installation
 
@@ -157,15 +157,36 @@ response = await llm.ask(
 )
 ```
 
-### Reasoning Models (OpenAI)
+### Extended Thinking (provider-agnostic)
+
+`reasoning_effort` is a single string — `"low"`, `"medium"`, or `"high"` — that
+each provider translates to its native extended-thinking config. Pass `None`
+(or omit) to disable. Unknown values are ignored with a warning.
+
+| Effort   | Thinking budget |
+|----------|-----------------|
+| `low`    | 1,024 tokens    |
+| `medium` | 4,096 tokens    |
+| `high`   | 16,384 tokens   |
 
 ```python
-llm = AskLLM(model="gpt-5.4")
+# Same call works on OpenAI, Anthropic, or Google
+llm = AskLLM(model="anthropic/claude-sonnet-4-6")
 response = await llm.ask(
     prompt="Solve this math problem: 2x + 5 = 15",
-    reasoning_effort="high"
+    reasoning_effort="high",
 )
 ```
+
+Provider-specific notes:
+
+- **OpenAI** — passed through as `reasoning.effort`.
+- **Anthropic** — sets `thinking={"type": "enabled", "budget_tokens": N}`.
+  When enabled, `temperature` is forced to `1` and `top_p` / `top_k` are
+  dropped (Anthropic API constraint); `max_tokens` is widened to leave
+  ~1024 tokens for the visible answer.
+- **Google (Gemini 2.5+ / 3.x)** — sets `thinking_config` with
+  `include_thoughts=False` so only the final answer streams to the caller.
 
 ### Streaming
 
@@ -225,6 +246,7 @@ Initialize the LLM client.
 - `request_timeout` (float, optional): Request timeout in seconds (default: 60)
 - `google_explicit_cache` (bool, optional): Enable Google context caching (default: True)
 - `google_inline_citations` (bool, optional): Inject `[cite: url]` markers for Gemini grounding (default: True)
+- `google_attach_search_tool` (bool, optional): When using Gemini with no custom tools, attach the Google Search tool (default: True). Ignored for non-Google models.
 
 #### `ask(...)`
 
@@ -238,7 +260,7 @@ Generate a response from the LLM.
 - `temperature` (float, optional): Sampling temperature (0-2)
 - `top_p` (float, optional): Nucleus sampling parameter
 - `presence_penalty` (float, optional): Presence penalty (OpenAI only)
-- `reasoning_effort` (str, optional): Reasoning effort level (OpenAI only)
+- `reasoning_effort` (str, optional): Extended-thinking effort, `"low" | "medium" | "high"`. Provider-agnostic — see [Extended Thinking](#extended-thinking-provider-agnostic).
 - `tools_schema` (list, optional): Tool/function calling schema (OpenAI, Anthropic, Google)
 - `response_format` (dict, optional): Response format specification
 - `execute_tool_cb` (callable, optional): Tool execution callback (OpenAI, Anthropic, Google)

@@ -128,11 +128,34 @@ class TestGoogleTextClientBuildConfigDict:
             assert len(config["tools"]) == 1
 
     def test_build_config_without_google_search_for_streaming(self):
-        """include_google_search=False omits tools (for streaming)."""
+        """No Google Search tool when include_google_search is False (streaming path)."""
         with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
-            client = GoogleTextClient(config=_config())
+            client = GoogleTextClient(config=_config(), google_attach_search_tool=False)
             config = client._build_config_dict(include_google_search=False)
             assert "tools" not in config
+
+    def test_build_config_omits_thinking_by_default(self):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            client = GoogleTextClient(config=_config())
+            config = client._build_config_dict()
+            assert "thinking_config" not in config
+
+    def test_build_config_with_reasoning_effort(self):
+        from google.genai import types
+
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            client = GoogleTextClient(config=_config())
+            config = client._build_config_dict(reasoning_effort="high")
+            tc = config.get("thinking_config")
+            assert isinstance(tc, types.ThinkingConfig)
+            assert tc.thinking_budget == 16384
+            assert tc.include_thoughts is False
+
+    def test_build_config_unknown_effort_is_ignored(self):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            client = GoogleTextClient(config=_config())
+            config = client._build_config_dict(reasoning_effort="ultra")
+            assert "thinking_config" not in config
 
 
 class TestConvertToolsToGemini:
