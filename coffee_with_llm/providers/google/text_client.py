@@ -21,6 +21,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
+from .._reasoning import thinking_budget_tokens
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -162,10 +163,12 @@ class GoogleTextClient:
         request_timeout: Optional[float] = None,
         google_explicit_cache: bool = True,
         google_inline_citations: bool = True,
+        google_attach_search_tool: bool = True,
     ) -> None:
         self._api_key = config.require_google_key()
         self._google_explicit_cache = google_explicit_cache
         self._google_inline_citations = google_inline_citations
+        self._google_attach_search_tool = google_attach_search_tool
 
         try:
             self._client = genai.Client(api_key=self._api_key)
@@ -190,6 +193,7 @@ class GoogleTextClient:
         response_format: Optional[Dict[str, Any]] = None,
         tools_schema: Optional[List[Dict[str, Any]]] = None,
         include_google_search: bool = True,
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build generation config as dict for Google Gemini API."""
         config_dict: Dict[str, Any] = {}
@@ -221,6 +225,13 @@ class GoogleTextClient:
                 if json_schema:
                     config_dict["response_mime_type"] = "application/json"
                     config_dict["response_json_schema"] = json_schema
+
+        budget = thinking_budget_tokens(reasoning_effort)
+        if budget is not None:
+            config_dict["thinking_config"] = types.ThinkingConfig(
+                thinking_budget=budget,
+                include_thoughts=False,
+            )
 
         return config_dict
 
@@ -431,6 +442,8 @@ class GoogleTextClient:
             top_p=top_p,
             response_format=response_format,
             tools_schema=tools_schema if use_tools else None,
+            include_google_search=self._google_attach_search_tool and not use_tools,
+            reasoning_effort=reasoning_effort,
         )
 
         request_kwargs: Dict[str, Any] = {
@@ -587,7 +600,7 @@ class GoogleTextClient:
         force_tool_use: bool = False,
         usage_sink: Optional[StreamUsageSink] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
-        del presence_penalty, reasoning_effort, force_tool_use
+        del presence_penalty, force_tool_use
 
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
@@ -596,8 +609,8 @@ class GoogleTextClient:
 
         system_instruct = system_instruct or (instructions or "")
         use_tools = bool(tools_schema and execute_tool_cb)
-        # Streaming with custom tools: never combine Google Search (plan).
-        include_search = not use_tools
+        # Custom tools replace config tools; optional Google Search when no custom tools.
+        include_search = self._google_attach_search_tool and not use_tools
 
         cached_context_name = await self._get_or_create_cached_context(system_instruct, model)
 
@@ -614,6 +627,7 @@ class GoogleTextClient:
             response_format=response_format,
             tools_schema=tools_schema if use_tools else None,
             include_google_search=include_search,
+            reasoning_effort=reasoning_effort,
         )
 
         request_kwargs: Dict[str, Any] = {

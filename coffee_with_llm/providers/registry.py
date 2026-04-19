@@ -61,6 +61,7 @@ def get_provider(
     request_timeout: Optional[float] = None,
     google_explicit_cache: bool = True,
     google_inline_citations: bool = True,
+    google_attach_search_tool: bool = True,
 ) -> ProviderProtocol:
     """Return the appropriate provider client for the given model name."""
     _, route_key = split_provider_model(model)
@@ -74,5 +75,6 @@ def get_provider(
             **kwargs,
             google_explicit_cache=google_explicit_cache,
             google_inline_citations=google_inline_citations,
+            google_attach_search_tool=google_attach_search_tool,
         )
     return OpenAIResponsesClient(**kwargs)

@@ -7,7 +7,10 @@ import pytest
 from coffee_with_llm import Config
 from coffee_with_llm.exceptions import ConfigurationError
 from coffee_with_llm.providers.anthropic import AnthropicMessagesClient
-from coffee_with_llm.providers.anthropic.messages_client import _convert_tools_to_anthropic
+from coffee_with_llm.providers.anthropic.messages_client import (
+    _apply_thinking,
+    _convert_tools_to_anthropic,
+)
 from coffee_with_llm.providers.tool_utils import normalize_tool_result
 
 
@@ -122,6 +125,43 @@ class TestAnthropicMessagesClientNormalizeToolResult:
         """Test normalization with invalid input."""
         normalized = normalize_tool_result("invalid")
         assert normalized == {"ok": False, "result": {}, "error": None}
+
+
+class TestApplyThinking:
+    """Tests for _apply_thinking — provider-agnostic reasoning_effort plumbing."""
+
+    def test_no_op_when_effort_missing(self):
+        params = {"max_tokens": 4096, "temperature": 0.7, "top_p": 0.9}
+        snapshot = dict(params)
+        _apply_thinking(params, None)
+        assert params == snapshot
+
+    def test_no_op_when_effort_unknown(self):
+        params = {"max_tokens": 4096, "top_p": 0.9}
+        snapshot = dict(params)
+        _apply_thinking(params, "ultra")
+        assert params == snapshot
+
+    def test_high_effort_sets_thinking_and_normalizes_constraints(self):
+        params = {"max_tokens": 4096, "temperature": 0.3, "top_p": 0.9, "top_k": 40}
+        _apply_thinking(params, "high")
+
+        assert params["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+        assert params["temperature"] == 1
+        assert "top_p" not in params
+        assert "top_k" not in params
+        assert params["max_tokens"] >= 16384 + 1024
+
+    def test_low_effort_keeps_caller_max_tokens_when_sufficient(self):
+        params = {"max_tokens": 32_000}
+        _apply_thinking(params, "low")
+        assert params["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+        assert params["max_tokens"] == 32_000
+
+    def test_widens_max_tokens_when_too_small(self):
+        params = {"max_tokens": 100}
+        _apply_thinking(params, "medium")
+        assert params["max_tokens"] >= 4096 + 1024
 
 
 class TestAnthropicMessagesClientGenerate:

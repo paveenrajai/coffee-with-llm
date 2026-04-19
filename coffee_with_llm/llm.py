@@ -46,6 +46,7 @@ class AskLLM:
         request_timeout: Optional[float] = None,
         google_explicit_cache: bool = True,
         google_inline_citations: bool = True,
+        google_attach_search_tool: bool = True,
     ) -> None:
         """
         Initialize AskLLM with a model.
@@ -62,6 +63,8 @@ class AskLLM:
             request_timeout: Request timeout in seconds (default: 60)
             google_explicit_cache: Enable Google context caching for Gemini (default: True)
             google_inline_citations: Inject [cite: url] for Gemini grounding (default: True)
+            google_attach_search_tool: When using Gemini with no custom tools, attach the
+                Google Search tool (default: True). Ignored for non-Google models.
 
         Raises:
             ValidationError: If model is not provided.
@@ -90,6 +93,7 @@ class AskLLM:
                 request_timeout=self._request_timeout,
                 google_explicit_cache=google_explicit_cache,
                 google_inline_citations=google_inline_citations,
+                google_attach_search_tool=google_attach_search_tool,
             )
         except Exception as e:
             raise ConfigurationError(
@@ -129,7 +133,10 @@ class AskLLM:
             temperature: Sampling temperature (0-2)
             top_p: Nucleus sampling parameter
             presence_penalty: Presence penalty (OpenAI only)
-            reasoning_effort: Reasoning effort level (OpenAI only, e.g., "low", "medium", "high")
+            reasoning_effort: Extended-thinking effort, one of "low" | "medium" | "high".
+                Provider-agnostic: maps to OpenAI ``reasoning.effort``, Anthropic
+                ``thinking.budget_tokens``, and Google ``thinking_config``. Unknown
+                values are ignored. None disables extended thinking.
             tools_schema: Tool/function calling schema (OpenAI, Anthropic, Google)
             response_format: Response format specification (JSON schema, etc.)
             execute_tool_cb: Callback for executing tools (OpenAI, Anthropic, Google)

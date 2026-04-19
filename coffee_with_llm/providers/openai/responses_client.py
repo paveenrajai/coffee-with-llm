@@ -622,7 +622,7 @@ class OpenAIResponsesClient:
         usage_sink: Optional[StreamUsageSink] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
         """Stream ``StreamEvent`` chunks, then terminal ``TokenUsage``."""
-        del temperature, force_tool_use  # Responses API parity with generate(); unused here
+        del temperature, force_tool_use  # OpenAI; unused here
 
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")

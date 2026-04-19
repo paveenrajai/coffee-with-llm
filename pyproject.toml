@@ -1,6 +1,6 @@
 [project]
 name = "coffee_with_llm"
-version = "0.3.0"
+version = "0.5.0"
 description = "A model-agnostic Python library with a unified API for multiple LLM providers"
 readme = "README.md"
 requires-python = ">=3.10"
