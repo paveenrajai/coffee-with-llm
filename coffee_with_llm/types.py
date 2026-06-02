@@ -16,6 +16,8 @@ class TokenUsage:
     output_tokens: int
     total_tokens: int
     cached_tokens: Optional[int] = None
+    # Anthropic cache_creation_input_tokens (prompt cache writes); optional elsewhere.
+    cache_creation_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
 
 
@@ -76,17 +78,28 @@ class StreamUsageSink:
     _input: int = 0
     _output: int = 0
     _cached: Optional[int] = None
+    _cache_creation: Optional[int] = None
 
-    def merge(self, inp: int, out: int, cached: Optional[int] = None) -> None:
+    def merge(
+        self,
+        inp: int,
+        out: int,
+        cached: Optional[int] = None,
+        *,
+        cache_creation: Optional[int] = None,
+    ) -> None:
         self._input += int(inp)
         self._output += int(out)
         if cached is not None:
             self._cached = (self._cached or 0) + int(cached)
+        if cache_creation is not None:
+            self._cache_creation = (self._cache_creation or 0) + int(cache_creation)
 
     def replace_with(self, usage: TokenUsage) -> None:
         self._input = usage.input_tokens
         self._output = usage.output_tokens
         self._cached = usage.cached_tokens
+        self._cache_creation = usage.cache_creation_tokens
 
     def snapshot(self) -> TokenUsage:
         return TokenUsage(
@@ -94,6 +107,7 @@ class StreamUsageSink:
             output_tokens=self._output,
             total_tokens=self._input + self._output,
             cached_tokens=self._cached,
+            cache_creation_tokens=self._cache_creation,
         )
 
 

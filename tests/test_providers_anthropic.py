@@ -8,8 +8,12 @@ from coffee_with_llm import Config
 from coffee_with_llm.exceptions import ConfigurationError
 from coffee_with_llm.providers.anthropic import AnthropicMessagesClient
 from coffee_with_llm.providers.anthropic.messages_client import (
+    _accumulate_anthropic_usage,
+    _apply_prompt_cache,
     _apply_thinking,
     _convert_tools_to_anthropic,
+    _prepare_anthropic_request_params,
+    anthropic_uses_adaptive_thinking,
 )
 from coffee_with_llm.providers.tool_utils import normalize_tool_result
 
@@ -40,6 +44,13 @@ class TestAnthropicMessagesClientInitialization:
         with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
             client = AnthropicMessagesClient(config=_config())
             assert client._api_key == "test-key"
+            assert client._anthropic_prompt_cache is True
+
+    def test_init_prompt_cache_disabled(self):
+        fake_anthropic = MagicMock()
+        with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
+            client = AnthropicMessagesClient(config=_config(), anthropic_prompt_cache=False)
+            assert client._anthropic_prompt_cache is False
 
     def test_init_with_missing_anthropic_package(self):
         """Test that missing Anthropic package raises ConfigurationError."""
@@ -127,6 +138,77 @@ class TestAnthropicMessagesClientNormalizeToolResult:
         assert normalized == {"ok": False, "result": {}, "error": None}
 
 
+class TestAnthropicUsesAdaptiveThinking:
+    def test_opus_4_8_and_sonnet_4_6(self):
+        assert anthropic_uses_adaptive_thinking("claude-opus-4-8")
+        assert anthropic_uses_adaptive_thinking("claude-sonnet-4-6")
+        assert anthropic_uses_adaptive_thinking("claude-mythos-preview")
+
+    def test_legacy_models(self):
+        assert not anthropic_uses_adaptive_thinking("claude-sonnet-4-5")
+        assert not anthropic_uses_adaptive_thinking("")
+        assert not anthropic_uses_adaptive_thinking("gpt-4o")
+
+
+class TestPrepareAnthropicRequestParams:
+    def test_applies_thinking_and_cache_together(self):
+        params = _prepare_anthropic_request_params(
+            model="claude-opus-4-8",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=4096,
+            system="You are helpful.",
+            top_p=None,
+            temperature=None,
+            anthropic_tools=[],
+            force_tool_use=False,
+            response_format=None,
+            reasoning_effort="high",
+            prompt_cache=True,
+        )
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "high"}
+        assert params["cache_control"] == {"type": "ephemeral"}
+        assert params["system"] == "You are helpful."
+
+
+class TestApplyPromptCache:
+    def test_adds_top_level_cache_control(self):
+        params: dict = {"model": "claude-sonnet-4-6"}
+        _apply_prompt_cache(params, True)
+        assert params["cache_control"] == {"type": "ephemeral"}
+
+    def test_no_op_when_disabled(self):
+        params: dict = {"model": "claude-sonnet-4-6"}
+        _apply_prompt_cache(params, False)
+        assert "cache_control" not in params
+
+    def test_no_op_when_already_set(self):
+        params = {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+        _apply_prompt_cache(params, True)
+        assert params["cache_control"]["ttl"] == "1h"
+
+
+class TestAccumulateAnthropicUsage:
+    def test_sums_cache_read_and_creation_tokens(self):
+        usage = MagicMock(
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_input_tokens=50,
+            cache_creation_input_tokens=200,
+        )
+        inp, out, cached, created = _accumulate_anthropic_usage(
+            usage,
+            total_input=10,
+            total_output=5,
+            total_cached=0,
+            total_cache_creation=0,
+        )
+        assert inp == 110
+        assert out == 25
+        assert cached == 50
+        assert created == 200
+
+
 class TestApplyThinking:
     """Tests for _apply_thinking — provider-agnostic reasoning_effort plumbing."""
 
@@ -142,8 +224,14 @@ class TestApplyThinking:
         _apply_thinking(params, "ultra")
         assert params == snapshot
 
-    def test_high_effort_sets_thinking_and_normalizes_constraints(self):
-        params = {"max_tokens": 4096, "temperature": 0.3, "top_p": 0.9, "top_k": 40}
+    def test_high_effort_legacy_model_sets_budget_thinking(self):
+        params = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 4096,
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "top_k": 40,
+        }
         _apply_thinking(params, "high")
 
         assert params["thinking"] == {"type": "enabled", "budget_tokens": 16384}
@@ -152,14 +240,36 @@ class TestApplyThinking:
         assert "top_k" not in params
         assert params["max_tokens"] >= 16384 + 1024
 
-    def test_low_effort_keeps_caller_max_tokens_when_sufficient(self):
-        params = {"max_tokens": 32_000}
+    def test_high_effort_adaptive_model_sets_output_config(self):
+        params = {"model": "claude-opus-4-8", "max_tokens": 4096, "temperature": 0.3, "top_p": 0.9}
+        _apply_thinking(params, "High")
+
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "high"}
+        assert params["temperature"] == 0.3
+        assert params["top_p"] == 0.9
+        assert params["max_tokens"] == 16_000
+
+    def test_adaptive_merges_existing_output_config(self):
+        params = {
+            "model": "claude-opus-4-8",
+            "max_tokens": 20_000,
+            "output_config": {"format": {"type": "json_schema"}},
+        }
+        _apply_thinking(params, "medium")
+
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"]["effort"] == "medium"
+        assert params["output_config"]["format"]["type"] == "json_schema"
+
+    def test_low_effort_legacy_keeps_caller_max_tokens_when_sufficient(self):
+        params = {"model": "claude-sonnet-4-5", "max_tokens": 32_000}
         _apply_thinking(params, "low")
         assert params["thinking"] == {"type": "enabled", "budget_tokens": 1024}
         assert params["max_tokens"] == 32_000
 
-    def test_widens_max_tokens_when_too_small(self):
-        params = {"max_tokens": 100}
+    def test_widens_max_tokens_when_too_small_legacy(self):
+        params = {"model": "claude-sonnet-4-5", "max_tokens": 100}
         _apply_thinking(params, "medium")
         assert params["max_tokens"] >= 4096 + 1024
 

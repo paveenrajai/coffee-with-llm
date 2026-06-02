@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import re
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
 from ...config import Config
@@ -19,7 +20,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
-from .._reasoning import thinking_budget_tokens
+from .._reasoning import normalize_effort, thinking_budget_tokens
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -68,17 +69,54 @@ def _convert_tools_to_anthropic(tools_schema: List[Dict[str, Any]]) -> List[Dict
     return anthropic_tools
 
 
+_ADAPTIVE_MODEL_RE = re.compile(r"(?:opus|sonnet)-4-(\d+)", re.IGNORECASE)
+
+# Soft floor for adaptive thinking (thinking + answer share max_tokens).
+_ADAPTIVE_MIN_MAX_TOKENS = {"low": 8192, "medium": 12_000, "high": 16_000}
+
+
+def anthropic_uses_adaptive_thinking(model: str) -> bool:
+    """Return True when the model expects adaptive thinking (Claude 4.6+)."""
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    if "mythos" in m:
+        return True
+    match = _ADAPTIVE_MODEL_RE.search(m)
+    if match is None:
+        return False
+    return int(match.group(1)) >= 6
+
+
 def _apply_thinking(params: Dict[str, Any], reasoning_effort: Optional[str]) -> None:
     """Translate ``reasoning_effort`` into Anthropic ``thinking`` config, in place.
 
-    Anthropic constraints when extended thinking is enabled:
+    Claude Opus/Sonnet 4.6+ use adaptive thinking with ``output_config.effort``.
+    Older models use manual ``thinking.type: enabled`` + ``budget_tokens``.
+
+    Manual-mode constraints (legacy only):
       * ``temperature`` must be 1 (we force it).
       * ``top_p`` / ``top_k`` are not allowed (we strip them).
-      * ``max_tokens`` must exceed ``budget_tokens`` (we widen if needed,
-        leaving ~1024 tokens of room for the visible answer).
+      * ``max_tokens`` must exceed ``budget_tokens`` (we widen if needed).
 
     No-op when ``reasoning_effort`` is unset or unrecognized.
     """
+    effort = normalize_effort(reasoning_effort)
+    if effort is None:
+        return
+
+    model = str(params.get("model") or "")
+    if anthropic_uses_adaptive_thinking(model):
+        params["thinking"] = {"type": "adaptive"}
+        output_config = dict(params.get("output_config") or {})
+        output_config["effort"] = effort
+        params["output_config"] = output_config
+        min_max = _ADAPTIVE_MIN_MAX_TOKENS.get(effort, 16_000)
+        current_max = params.get("max_tokens") or 0
+        if current_max < min_max:
+            params["max_tokens"] = min_max
+        return
+
     budget = thinking_budget_tokens(reasoning_effort)
     if budget is None:
         return
@@ -90,6 +128,103 @@ def _apply_thinking(params: Dict[str, Any], reasoning_effort: Optional[str]) -> 
     required = budget + 1024
     if current_max < required:
         params["max_tokens"] = required
+
+
+def _apply_prompt_cache(params: Dict[str, Any], enabled: bool) -> None:
+    """Enable Anthropic automatic prompt caching.
+
+    Uses the API-recommended top-level ``cache_control`` so the breakpoint
+    advances with growing ``messages`` (multi-turn + tool loops). Callers with
+    a static prefix and a per-request suffix should disable this and set explicit
+    breakpoints on stable blocks instead (see Anthropic prompt caching docs).
+    """
+    if not enabled or "cache_control" in params:
+        return
+    params["cache_control"] = {"type": "ephemeral"}
+
+
+def _accumulate_anthropic_usage(
+    usage: Any,
+    *,
+    total_input: int,
+    total_output: int,
+    total_cached: int,
+    total_cache_creation: int,
+) -> tuple[int, int, int, int]:
+    """Add one Messages API usage object to running totals."""
+    if usage is None:
+        return total_input, total_output, total_cached, total_cache_creation
+    total_input += int(getattr(usage, "input_tokens", 0) or 0)
+    total_output += int(getattr(usage, "output_tokens", 0) or 0)
+    total_cached += int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    total_cache_creation += int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    return total_input, total_output, total_cached, total_cache_creation
+
+
+def _log_anthropic_cache_usage(usage: Any) -> None:
+    if usage is None:
+        return
+    created = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    if created or read:
+        logger.info(
+            "[ANTHROPIC] prompt cache creation_tokens=%d read_tokens=%d",
+            created,
+            read,
+        )
+
+
+def _token_usage_from_totals(
+    total_input: int,
+    total_output: int,
+    total_cached: int,
+    total_cache_creation: int = 0,
+) -> TokenUsage:
+    return TokenUsage(
+        input_tokens=total_input,
+        output_tokens=total_output,
+        total_tokens=total_input + total_output,
+        cached_tokens=total_cached if total_cached else None,
+        cache_creation_tokens=total_cache_creation if total_cache_creation else None,
+    )
+
+
+def _prepare_anthropic_request_params(
+    *,
+    model: str,
+    messages: List[Dict[str, Any]],
+    max_tokens: Optional[int],
+    system: Optional[str],
+    top_p: Optional[float],
+    temperature: Optional[float],
+    anthropic_tools: List[Dict[str, Any]],
+    force_tool_use: bool,
+    response_format: Optional[Any],
+    reasoning_effort: Optional[str],
+    prompt_cache: bool,
+) -> Dict[str, Any]:
+    """Build a Messages API request body with thinking and cache options applied."""
+    params: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens or 4096,
+        "messages": messages,
+    }
+    if system:
+        params["system"] = system
+    if temperature is not None:
+        params["temperature"] = temperature
+    if top_p is not None:
+        params["top_p"] = top_p
+    if anthropic_tools:
+        params["tools"] = anthropic_tools
+        if force_tool_use:
+            params["tool_choice"] = {"type": "any"}
+    out_fmt = _output_format_from_response_format(response_format)
+    if out_fmt:
+        params["output_format"] = out_fmt
+    _apply_thinking(params, reasoning_effort)
+    _apply_prompt_cache(params, prompt_cache)
+    return params
 
 
 def _output_format_from_response_format(response_format: Any) -> Optional[Dict[str, Any]]:
@@ -116,8 +251,15 @@ def _output_format_from_response_format(response_format: Any) -> Optional[Dict[s
 class AnthropicMessagesClient:
     """Anthropic Claude client using Messages API with tool use support."""
 
-    def __init__(self, config: Config, request_timeout: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        request_timeout: Optional[float] = None,
+        *,
+        anthropic_prompt_cache: bool = True,
+    ) -> None:
         self._api_key = config.require_anthropic_key()
+        self._anthropic_prompt_cache = anthropic_prompt_cache
 
         try:
             from anthropic import AsyncAnthropic
@@ -249,6 +391,7 @@ class AnthropicMessagesClient:
         finalize_resp = await client.messages.create(**finalize_params)
         text = self._content_to_text(getattr(finalize_resp, "content", []) or [])
         fu = getattr(finalize_resp, "usage", None)
+        _log_anthropic_cache_usage(fu)
         inp_delta = getattr(fu, "input_tokens", 0) or 0 if fu else 0
         out_delta = getattr(fu, "output_tokens", 0) or 0 if fu else 0
         return text, inp_delta, out_delta
@@ -318,31 +461,28 @@ class AnthropicMessagesClient:
         anthropic_tools = _convert_tools_to_anthropic(tools_schema or [])
         base_messages = self._build_messages(prompt, messages)
 
-        params: Dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens or 4096,
-            "messages": base_messages,
-        }
-        if instructions:
-            params["system"] = instructions
-        if top_p is not None:
-            params["top_p"] = top_p
-        if anthropic_tools:
-            params["tools"] = anthropic_tools
-            if force_tool_use:
-                params["tool_choice"] = {"type": "any"}
-                logger.info("[ANTHROPIC] tool_choice=any (force tool use)")
-
-        out_fmt = _output_format_from_response_format(response_format)
-        if out_fmt:
-            params["output_format"] = out_fmt
-
-        _apply_thinking(params, reasoning_effort)
+        system = (instructions or "").strip() or None
+        params = _prepare_anthropic_request_params(
+            model=model,
+            messages=base_messages,
+            max_tokens=max_tokens,
+            system=system,
+            top_p=top_p,
+            temperature=temperature,
+            anthropic_tools=anthropic_tools,
+            force_tool_use=force_tool_use,
+            response_format=response_format,
+            reasoning_effort=reasoning_effort,
+            prompt_cache=self._anthropic_prompt_cache,
+        )
+        if force_tool_use and anthropic_tools:
+            logger.info("[ANTHROPIC] tool_choice=any (force tool use)")
 
         logger.info(
-            "[ANTHROPIC] Request params keys: %s (tool_choice=%s)",
+            "[ANTHROPIC] Request params keys: %s (tool_choice=%s prompt_cache=%s)",
             list(params.keys()),
             params.get("tool_choice"),
+            self._anthropic_prompt_cache,
         )
 
         last_resp: Optional[Any] = None
@@ -352,6 +492,8 @@ class AnthropicMessagesClient:
         pending_resp: Optional[Any] = None
         total_input = 0
         total_output = 0
+        total_cached = 0
+        total_cache_creation = 0
 
         for step in range(max_steps):
             try:
@@ -381,16 +523,36 @@ class AnthropicMessagesClient:
                 for b in content
             ]
             usage = getattr(resp, "usage", None)
+            _log_anthropic_cache_usage(usage)
             usage_str = ""
             if usage:
-                inp = getattr(usage, "input_tokens", None)
-                out = getattr(usage, "output_tokens", None)
-                if inp is not None:
-                    total_input += inp
-                if out is not None:
-                    total_output += out
-                if inp is not None or out is not None:
-                    usage_str = f", usage=input={inp or 0} output={out or 0}"
+                prev_in, prev_out, prev_cached, prev_created = (
+                    total_input,
+                    total_output,
+                    total_cached,
+                    total_cache_creation,
+                )
+                (
+                    total_input,
+                    total_output,
+                    total_cached,
+                    total_cache_creation,
+                ) = _accumulate_anthropic_usage(
+                    usage,
+                    total_input=total_input,
+                    total_output=total_output,
+                    total_cached=total_cached,
+                    total_cache_creation=total_cache_creation,
+                )
+                inp = total_input - prev_in
+                out = total_output - prev_out
+                cached = total_cached - prev_cached
+                created = total_cache_creation - prev_created
+                if inp or out or cached or created:
+                    usage_str = (
+                        f", usage=input={inp} output={out} "
+                        f"cache_read={cached} cache_creation={created}"
+                    )
 
             logger.info(
                 "[ANTHROPIC] step=%d stop_reason=%s block_types=%s%s",
@@ -514,13 +676,9 @@ class AnthropicMessagesClient:
         if not final_text.strip():
             raise APIError("Empty response received from Anthropic API")
 
-        usage = TokenUsage(
-            input_tokens=total_input,
-            output_tokens=total_output,
-            total_tokens=total_input + total_output,
-            cached_tokens=None,
+        return final_text, _token_usage_from_totals(
+            total_input, total_output, total_cached, total_cache_creation
         )
-        return final_text, usage
 
     async def generate_stream(
         self,
@@ -567,27 +725,38 @@ class AnthropicMessagesClient:
 
         total_input = 0
         total_output = 0
+        total_cached = 0
+        total_cache_creation = 0
         effective_steps = 0
         consecutive_reasoning_only = 0
         pending_resp: Optional[Any] = None
 
         def apply_usage_from_message(message: Any) -> None:
             """Accumulate Anthropic message.usage into totals and usage_sink."""
-            nonlocal total_input, total_output
+            nonlocal total_input, total_output, total_cached, total_cache_creation
             usage = getattr(message, "usage", None)
             if usage is None:
                 return
-            inp = getattr(usage, "input_tokens", 0) or 0
-            out = getattr(usage, "output_tokens", 0) or 0
-            total_input += inp
-            total_output += out
+            _log_anthropic_cache_usage(usage)
+            (
+                total_input,
+                total_output,
+                total_cached,
+                total_cache_creation,
+            ) = _accumulate_anthropic_usage(
+                usage,
+                total_input=total_input,
+                total_output=total_output,
+                total_cached=total_cached,
+                total_cache_creation=total_cache_creation,
+            )
             if usage_sink is not None:
                 usage_sink.replace_with(
-                    TokenUsage(
+                    _token_usage_from_totals(
                         total_input,
                         total_output,
-                        total_input + total_output,
-                        None,
+                        total_cached,
+                        total_cache_creation,
                     )
                 )
 
@@ -596,27 +765,20 @@ class AnthropicMessagesClient:
                 if use_tools and step > 0:
                     yield StreamStepBoundary(step)
 
-                params: Dict[str, Any] = {
-                    "model": model,
-                    "max_tokens": max_tokens or 4096,
-                    "messages": base_messages,
-                }
                 system = (instructions or system_instruct or "").strip() or None
-                if system:
-                    params["system"] = system
-                if temperature is not None:
-                    params["temperature"] = temperature
-                if top_p is not None:
-                    params["top_p"] = top_p
-                if anthropic_tools:
-                    params["tools"] = anthropic_tools
-                    if force_tool_use:
-                        params["tool_choice"] = {"type": "any"}
-                out_fmt = _output_format_from_response_format(response_format)
-                if out_fmt:
-                    params["output_format"] = out_fmt
-
-                _apply_thinking(params, reasoning_effort)
+                params = _prepare_anthropic_request_params(
+                    model=model,
+                    messages=base_messages,
+                    max_tokens=max_tokens,
+                    system=system,
+                    top_p=top_p,
+                    temperature=temperature,
+                    anthropic_tools=anthropic_tools,
+                    force_tool_use=force_tool_use,
+                    response_format=response_format,
+                    reasoning_effort=reasoning_effort,
+                    prompt_cache=self._anthropic_prompt_cache,
+                )
 
                 if pending_resp is not None:
                     resp = pending_resp
@@ -656,10 +818,19 @@ class AnthropicMessagesClient:
                                 elif et == "message_delta" and usage_sink is not None:
                                     u = getattr(event, "usage", None)
                                     if u is not None:
+                                        cached_delta = int(
+                                            getattr(u, "cache_read_input_tokens", 0) or 0
+                                        )
+                                        creation_delta = int(
+                                            getattr(u, "cache_creation_input_tokens", 0) or 0
+                                        )
                                         usage_sink.merge(
                                             getattr(u, "input_tokens", 0) or 0,
                                             getattr(u, "output_tokens", 0) or 0,
-                                            None,
+                                            cached_delta if cached_delta else None,
+                                            cache_creation=(
+                                                creation_delta if creation_delta else None
+                                            ),
                                         )
                         finally:
                             try:
@@ -755,11 +926,8 @@ class AnthropicMessagesClient:
                 ):
                     break
 
-            yield TokenUsage(
-                input_tokens=total_input,
-                output_tokens=total_output,
-                total_tokens=total_input + total_output,
-                cached_tokens=None,
+            yield _token_usage_from_totals(
+                total_input, total_output, total_cached, total_cache_creation
             )
         except Exception as e:
             if is_rate_limit_error(e):
