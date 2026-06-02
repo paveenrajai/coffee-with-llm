@@ -47,6 +47,7 @@ class AskLLM:
         google_explicit_cache: bool = True,
         google_inline_citations: bool = True,
         google_attach_search_tool: bool = True,
+        anthropic_prompt_cache: bool = True,
     ) -> None:
         """
         Initialize AskLLM with a model.
@@ -65,6 +66,8 @@ class AskLLM:
             google_inline_citations: Inject [cite: url] for Gemini grounding (default: True)
             google_attach_search_tool: When using Gemini with no custom tools, attach the
                 Google Search tool (default: True). Ignored for non-Google models.
+            anthropic_prompt_cache: Enable Anthropic automatic prompt caching via top-level
+                ``cache_control`` (default: True). Ignored for non-Anthropic models.
 
         Raises:
             ValidationError: If model is not provided.
@@ -94,6 +97,7 @@ class AskLLM:
                 google_explicit_cache=google_explicit_cache,
                 google_inline_citations=google_inline_citations,
                 google_attach_search_tool=google_attach_search_tool,
+                anthropic_prompt_cache=anthropic_prompt_cache,
             )
         except Exception as e:
             raise ConfigurationError(
@@ -135,6 +139,7 @@ class AskLLM:
             presence_penalty: Presence penalty (OpenAI only)
             reasoning_effort: Extended-thinking effort, one of "low" | "medium" | "high".
                 Provider-agnostic: maps to OpenAI ``reasoning.effort``, Anthropic
+                Anthropic adaptive ``output_config.effort`` (4.6+) or legacy
                 ``thinking.budget_tokens``, and Google ``thinking_config``. Unknown
                 values are ignored. None disables extended thinking.
             tools_schema: Tool/function calling schema (OpenAI, Anthropic, Google)
@@ -307,6 +312,7 @@ class AskLLM:
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
             cached_tokens=usage.cached_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
             cost_usd=cost,
         )
 

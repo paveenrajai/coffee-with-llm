@@ -8,9 +8,9 @@ A model-agnostic Python library providing a unified API for OpenAI, Anthropic Cl
 - **Unified API**: Same interface for OpenAI, Anthropic Claude, and Google Gemini
 - **Tool Calling**: Full support for OpenAI's tool calling with multi-step execution
 - **Structured Outputs**: Support for JSON schema and response formatting
-- **Caching**: Built-in prompt caching for both providers
+- **Caching**: Google explicit context cache; Anthropic automatic prompt cache; OpenAI passes through `cached_tokens` when present
 - **Citations**: Automatic citation injection for Google Gemini responses
-- **Extended thinking**: Single `reasoning_effort` knob (`"low" | "medium" | "high"`) translates to OpenAI `reasoning.effort`, Anthropic `thinking.budget_tokens`, and Google `thinking_config`
+- **Extended thinking**: Single `reasoning_effort` knob (`"low" | "medium" | "high"`) translates to OpenAI `reasoning.effort`, Anthropic adaptive `output_config.effort` (4.6+) or legacy `thinking.budget_tokens`, and Google `thinking_config`
 
 ## Installation
 
@@ -163,11 +163,11 @@ response = await llm.ask(
 each provider translates to its native extended-thinking config. Pass `None`
 (or omit) to disable. Unknown values are ignored with a warning.
 
-| Effort   | Thinking budget |
-|----------|-----------------|
-| `low`    | 1,024 tokens    |
-| `medium` | 4,096 tokens    |
-| `high`   | 16,384 tokens   |
+| Effort   | Anthropic (4.6+)     | Anthropic (legacy) / Google |
+|----------|----------------------|-----------------------------|
+| `low`    | `output_config.effort` | 1,024 token budget          |
+| `medium` | (adaptive thinking)  | 4,096 token budget          |
+| `high`   |                      | 16,384 token budget         |
 
 ```python
 # Same call works on OpenAI, Anthropic, or Google
@@ -181,10 +181,15 @@ response = await llm.ask(
 Provider-specific notes:
 
 - **OpenAI** — passed through as `reasoning.effort`.
-- **Anthropic** — sets `thinking={"type": "enabled", "budget_tokens": N}`.
-  When enabled, `temperature` is forced to `1` and `top_p` / `top_k` are
-  dropped (Anthropic API constraint); `max_tokens` is widened to leave
-  ~1024 tokens for the visible answer.
+- **Anthropic** — on Claude Opus/Sonnet 4.6+ and Mythos, sets
+  `thinking={"type": "adaptive"}` and `output_config={"effort": ...}`.
+  On older models, sets `thinking={"type": "enabled", "budget_tokens": N}`
+  (legacy); then `temperature` is forced to `1`, `top_p` / `top_k` are dropped,
+  and `max_tokens` is widened to leave ~1024 tokens for the visible answer.
+  With `anthropic_prompt_cache=True` (default), adds top-level
+  `cache_control={"type": "ephemeral"}` for automatic multi-turn caching;
+  `TokenUsage.cached_tokens` reflects `cache_read_input_tokens`;
+  `cache_creation_tokens` reflects cache writes; both are included in `cost_usd`.
 - **Google (Gemini 2.5+ / 3.x)** — sets `thinking_config` with
   `include_thoughts=False` so only the final answer streams to the caller.
 
@@ -245,6 +250,7 @@ Initialize the LLM client.
 - `max_retries` (int, optional): Max retries for rate limit errors (default: 3)
 - `request_timeout` (float, optional): Request timeout in seconds (default: 60)
 - `google_explicit_cache` (bool, optional): Enable Google context caching (default: True)
+- `anthropic_prompt_cache` (bool, optional): Enable Anthropic automatic prompt caching (default: True)
 - `google_inline_citations` (bool, optional): Inject `[cite: url]` markers for Gemini grounding (default: True)
 - `google_attach_search_tool` (bool, optional): When using Gemini with no custom tools, attach the Google Search tool (default: True). Ignored for non-Google models.
 
@@ -283,7 +289,7 @@ Generate a response from the LLM.
 - `ANTHROPIC_API_KEY`: Anthropic API key (required for Claude models)
 - `GOOGLE_API_KEY`: Google API key (required for Google models)
 
-Google-specific options (`google_explicit_cache`, `google_inline_citations`) are passed as constructor params to `AskLLM`; see docstring.
+Provider options (`google_explicit_cache`, `google_inline_citations`, `anthropic_prompt_cache`) are passed as constructor params to `AskLLM`; see docstring.
 
 ## License
 

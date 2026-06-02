@@ -1,7 +1,8 @@
 """
 Token usage cost estimation.
 
-Prices are per 1M tokens in USD. Cached tokens use discounted rate when available.
+Prices are per 1M tokens in USD. Cache reads use discounted rates; Anthropic cache
+writes bill at 125% of base input (see anthropic.com/pricing).
 Sources: openai.com/api/pricing, ai.google.dev/pricing, anthropic.com/pricing
 """
 
@@ -21,11 +22,12 @@ _MODEL_PRICING: list[Tuple[str, float, float, Optional[float]]] = [
     ("gpt-5-nano", 0.05, 0.40, None),
     ("gpt-4o-mini", 0.15, 0.60, None),
     ("gpt-4o", 2.50, 10.00, 1.25),
-    # Anthropic
-    ("claude-sonnet-4-6", 3.00, 15.00, None),
-    ("claude-opus-4", 5.00, 25.00, None),
-    ("claude-haiku", 1.00, 5.00, None),
-    ("claude-3-5-sonnet", 3.00, 15.00, None),
+    # Anthropic (cached_per_1m ≈ 10% of input per anthropic.com/pricing)
+    ("claude-sonnet-4-6", 3.00, 15.00, 0.30),
+    ("claude-opus-4-8", 5.00, 25.00, 0.50),
+    ("claude-opus-4", 5.00, 25.00, 0.50),
+    ("claude-haiku", 1.00, 5.00, 0.10),
+    ("claude-3-5-sonnet", 3.00, 15.00, 0.30),
     # Google - most specific first
     ("gemini-3.1-pro-preview", 2.00, 12.00, 0.20),
     ("gemini-3.1-flash-lite-preview", 0.25, 1.50, 0.025),
@@ -60,7 +62,10 @@ def estimate_cost(usage: TokenUsage, model: str) -> Optional[float]:
         model: Model name (e.g. gpt-5-nano, gemini-3.1-pro-preview)
 
     Returns:
-        Estimated cost in USD, or None if model pricing unknown
+        Estimated cost in USD, or None if model pricing unknown.
+
+    Anthropic prompt-cache writes (``cache_creation_tokens``) are billed at 125% of
+    the model's input rate when present.
     """
     pricing = _get_pricing(model)
     if not pricing:
@@ -68,9 +73,13 @@ def estimate_cost(usage: TokenUsage, model: str) -> Optional[float]:
 
     inp_per_1m, out_per_1m, cached_per_1m = pricing
 
-    # Non-cached input: input_tokens - cached_tokens
     cached = usage.cached_tokens or 0
-    uncached_input = max(0, usage.input_tokens - cached)
+    # OpenAI: cached_tokens is often a subset of input_tokens. Anthropic: input_tokens
+    # and cache_read_input_tokens are disjoint buckets — do not subtract when disjoint.
+    if cached > usage.input_tokens:
+        uncached_input = usage.input_tokens
+    else:
+        uncached_input = max(0, usage.input_tokens - cached)
 
     cost = 0.0
     cost += (uncached_input / 1_000_000) * inp_per_1m
@@ -80,5 +89,9 @@ def estimate_cost(usage: TokenUsage, model: str) -> Optional[float]:
     elif cached > 0:
         # Fallback: cached at input rate (conservative)
         cost += (cached / 1_000_000) * inp_per_1m
+
+    cache_creation = usage.cache_creation_tokens or 0
+    if cache_creation > 0:
+        cost += (cache_creation / 1_000_000) * inp_per_1m * 1.25
 
     return round(cost, 6)
