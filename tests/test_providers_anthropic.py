@@ -144,6 +144,11 @@ class TestAnthropicUsesAdaptiveThinking:
         assert anthropic_uses_adaptive_thinking("claude-sonnet-4-6")
         assert anthropic_uses_adaptive_thinking("claude-mythos-preview")
 
+    def test_gen5_models(self):
+        assert anthropic_uses_adaptive_thinking("sonnet-5")
+        assert anthropic_uses_adaptive_thinking("claude-sonnet-5")
+        assert anthropic_uses_adaptive_thinking("claude-fable-5")
+
     def test_legacy_models(self):
         assert not anthropic_uses_adaptive_thinking("claude-sonnet-4-5")
         assert not anthropic_uses_adaptive_thinking("")
@@ -169,6 +174,61 @@ class TestPrepareAnthropicRequestParams:
         assert params["output_config"] == {"effort": "high"}
         assert params["cache_control"] == {"type": "ephemeral"}
         assert params["system"] == "You are helpful."
+
+    def test_sonnet_5_without_reasoning_disables_thinking(self):
+        params = _prepare_anthropic_request_params(
+            model="sonnet-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=16384,
+            system=None,
+            top_p=0.9,
+            temperature=0.7,
+            anthropic_tools=[],
+            force_tool_use=False,
+            response_format=None,
+            reasoning_effort=None,
+            prompt_cache=False,
+        )
+        assert params["model"] == "claude-sonnet-5"
+        assert params["thinking"] == {"type": "disabled"}
+        assert "temperature" not in params
+        assert "top_p" not in params
+        assert params["max_tokens"] == 16384
+
+    def test_sonnet_5_with_reasoning_uses_adaptive(self):
+        params = _prepare_anthropic_request_params(
+            model="sonnet-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=4096,
+            system=None,
+            top_p=None,
+            temperature=None,
+            anthropic_tools=[],
+            force_tool_use=False,
+            response_format=None,
+            reasoning_effort="high",
+            prompt_cache=False,
+        )
+        assert params["model"] == "claude-sonnet-5"
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "high"}
+
+    def test_fable_5_without_reasoning_minimizes_thinking(self):
+        params = _prepare_anthropic_request_params(
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=16384,
+            system=None,
+            top_p=None,
+            temperature=None,
+            anthropic_tools=[],
+            force_tool_use=False,
+            response_format=None,
+            reasoning_effort=None,
+            prompt_cache=False,
+        )
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "low"}
 
 
 class TestApplyPromptCache:
@@ -212,11 +272,22 @@ class TestAccumulateAnthropicUsage:
 class TestApplyThinking:
     """Tests for _apply_thinking — provider-agnostic reasoning_effort plumbing."""
 
-    def test_no_op_when_effort_missing(self):
-        params = {"max_tokens": 4096, "temperature": 0.7, "top_p": 0.9}
+    def test_no_op_when_effort_missing_on_legacy_model(self):
+        params = {"model": "claude-sonnet-4-5", "max_tokens": 4096, "temperature": 0.7, "top_p": 0.9}
         snapshot = dict(params)
         _apply_thinking(params, None)
         assert params == snapshot
+
+    def test_sonnet_5_disables_thinking_when_effort_missing(self):
+        params = {"model": "sonnet-5", "max_tokens": 16384}
+        _apply_thinking(params, None)
+        assert params["thinking"] == {"type": "disabled"}
+
+    def test_fable_5_minimizes_thinking_when_effort_missing(self):
+        params = {"model": "claude-fable-5", "max_tokens": 16384}
+        _apply_thinking(params, None)
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "low"}
 
     def test_no_op_when_effort_unknown(self):
         params = {"max_tokens": 4096, "top_p": 0.9}
@@ -249,6 +320,13 @@ class TestApplyThinking:
         assert params["temperature"] == 0.3
         assert params["top_p"] == 0.9
         assert params["max_tokens"] == 16_000
+
+    def test_sonnet_5_high_effort_uses_adaptive_not_legacy(self):
+        params = {"model": "sonnet-5", "max_tokens": 4096}
+        _apply_thinking(params, "high")
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "high"}
+        assert "budget_tokens" not in str(params.get("thinking", {}))
 
     def test_adaptive_merges_existing_output_config(self):
         params = {

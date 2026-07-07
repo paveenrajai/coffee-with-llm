@@ -23,6 +23,7 @@ _MODEL_PRICING: list[Tuple[str, float, float, Optional[float]]] = [
     ("gpt-4o-mini", 0.15, 0.60, None),
     ("gpt-4o", 2.50, 10.00, 1.25),
     # Anthropic (cached_per_1m ≈ 10% of input per anthropic.com/pricing)
+    ("claude-sonnet-5", 3.00, 15.00, 0.30),
     ("claude-sonnet-4-6", 3.00, 15.00, 0.30),
     ("claude-opus-4-8", 5.00, 25.00, 0.50),
     ("claude-opus-4", 5.00, 25.00, 0.50),
