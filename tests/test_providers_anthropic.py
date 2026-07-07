@@ -273,7 +273,12 @@ class TestApplyThinking:
     """Tests for _apply_thinking — provider-agnostic reasoning_effort plumbing."""
 
     def test_no_op_when_effort_missing_on_legacy_model(self):
-        params = {"model": "claude-sonnet-4-5", "max_tokens": 4096, "temperature": 0.7, "top_p": 0.9}
+        params = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 4096,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
         snapshot = dict(params)
         _apply_thinking(params, None)
         assert params == snapshot
