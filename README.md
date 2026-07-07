@@ -181,11 +181,16 @@ response = await llm.ask(
 Provider-specific notes:
 
 - **OpenAI** — passed through as `reasoning.effort`.
-- **Anthropic** — on Claude Opus/Sonnet 4.6+ and Mythos, sets
-  `thinking={"type": "adaptive"}` and `output_config={"effort": ...}`.
-  On older models, sets `thinking={"type": "enabled", "budget_tokens": N}`
-  (legacy); then `temperature` is forced to `1`, `top_p` / `top_k` are dropped,
-  and `max_tokens` is widened to leave ~1024 tokens for the visible answer.
+- **Anthropic** — on Claude Opus/Sonnet 4.6+, Gen 5, and Mythos, sets
+  `thinking={"type": "adaptive"}` and `output_config={"effort": ...}` when
+  `reasoning_effort` is set. On Sonnet 5 with no effort, explicitly disables
+  thinking (API default is on). On Fable/Mythos 5 with no effort, uses adaptive
+  at `low` effort (thinking cannot be disabled). On older models, sets
+  `thinking={"type": "enabled", "budget_tokens": N}` (legacy); then `temperature`
+  is forced to `1`, `top_p` / `top_k` are dropped, and `max_tokens` is widened
+  to leave ~1024 tokens for the visible answer. Short model aliases such as
+  `sonnet-5` normalize to `claude-sonnet-5`. Sampling params are omitted on
+  Opus 4.7+, Sonnet 5, and Fable/Mythos 5 (API returns 400 otherwise).
   With `anthropic_prompt_cache=True` (default), adds top-level
   `cache_control={"type": "ephemeral"}` for automatic multi-turn caching;
   `TokenUsage.cached_tokens` reflects `cache_read_input_tokens`;
@@ -225,7 +230,8 @@ Rate limits trigger retry before the first chunk.
 - Any OpenAI model name
 
 ### Anthropic Claude
-- `claude-opus-4-6`, `claude-sonnet-4-6` (latest)
+- `claude-sonnet-5`, `claude-opus-4-8`, `claude-sonnet-4-6` (latest)
+- Short aliases after provider prefix: `anthropic/sonnet-5`, `anthropic/fable-5`
 - `claude-haiku`, `claude-3-5-sonnet`
 - Any Claude model name (claude-* prefix)
 

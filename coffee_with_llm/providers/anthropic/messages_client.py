@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-import re
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
 from ...config import Config
@@ -26,6 +25,14 @@ from ..tool_utils import (
     normalize_tool_result,
     should_break_loop,
     update_step_tracking,
+)
+from .models import (
+    adaptive_min_max_tokens,
+    anthropic_rejects_sampling_params,
+    anthropic_supports_adaptive_thinking,
+    anthropic_thinking_can_disable,
+    anthropic_thinking_defaults_on,
+    normalize_anthropic_model_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,65 +76,91 @@ def _convert_tools_to_anthropic(tools_schema: List[Dict[str, Any]]) -> List[Dict
     return anthropic_tools
 
 
-_ADAPTIVE_MODEL_RE = re.compile(r"(?:opus|sonnet)-4-(\d+)", re.IGNORECASE)
-
-# Soft floor for adaptive thinking (thinking + answer share max_tokens).
-_ADAPTIVE_MIN_MAX_TOKENS = {"low": 8192, "medium": 12_000, "high": 16_000}
-
-
 def anthropic_uses_adaptive_thinking(model: str) -> bool:
-    """Return True when the model expects adaptive thinking (Claude 4.6+)."""
-    m = (model or "").strip().lower()
-    if not m:
-        return False
-    if "mythos" in m:
-        return True
-    match = _ADAPTIVE_MODEL_RE.search(m)
-    if match is None:
-        return False
-    return int(match.group(1)) >= 6
+    """Return True when the model supports adaptive thinking (Claude 4.6+, Gen 5)."""
+    return anthropic_supports_adaptive_thinking(model)
+
+
+def _set_adaptive_thinking(params: Dict[str, Any], effort: str) -> None:
+    """Enable adaptive thinking with ``output_config.effort`` and widen ``max_tokens``."""
+    params["thinking"] = {"type": "adaptive"}
+    output_config = dict(params.get("output_config") or {})
+    output_config["effort"] = effort
+    params["output_config"] = output_config
+    min_max = adaptive_min_max_tokens(effort)
+    current_max = params.get("max_tokens") or 0
+    if current_max < min_max:
+        params["max_tokens"] = min_max
 
 
 def _apply_thinking(params: Dict[str, Any], reasoning_effort: Optional[str]) -> None:
     """Translate ``reasoning_effort`` into Anthropic ``thinking`` config, in place.
 
-    Claude Opus/Sonnet 4.6+ use adaptive thinking with ``output_config.effort``.
-    Older models use manual ``thinking.type: enabled`` + ``budget_tokens``.
+    Caller requested effort (``low`` | ``medium`` | ``high``):
+      * Adaptive-capable models → ``thinking.type: adaptive`` + ``output_config.effort``.
+      * Older models → manual ``thinking.type: enabled`` + ``budget_tokens``.
+
+    No effort requested:
+      * Models that default to thinking on (Sonnet 5) → ``thinking.type: disabled``.
+      * Models with always-on thinking (Fable/Mythos 5, Mythos Preview) → adaptive at
+        ``low`` effort so ``max_tokens`` is not consumed by high-default reasoning.
+      * All other models → omit ``thinking`` (thinking off).
 
     Manual-mode constraints (legacy only):
-      * ``temperature`` must be 1 (we force it).
-      * ``top_p`` / ``top_k`` are not allowed (we strip them).
-      * ``max_tokens`` must exceed ``budget_tokens`` (we widen if needed).
-
-    No-op when ``reasoning_effort`` is unset or unrecognized.
+      * ``temperature`` must be 1 (forced).
+      * ``top_p`` / ``top_k`` are stripped.
+      * ``max_tokens`` must exceed ``budget_tokens``.
     """
-    effort = normalize_effort(reasoning_effort)
-    if effort is None:
-        return
-
     model = str(params.get("model") or "")
-    if anthropic_uses_adaptive_thinking(model):
-        params["thinking"] = {"type": "adaptive"}
-        output_config = dict(params.get("output_config") or {})
-        output_config["effort"] = effort
-        params["output_config"] = output_config
-        min_max = _ADAPTIVE_MIN_MAX_TOKENS.get(effort, 16_000)
-        current_max = params.get("max_tokens") or 0
-        if current_max < min_max:
-            params["max_tokens"] = min_max
+    effort = normalize_effort(reasoning_effort)
+
+    if effort is not None:
+        if anthropic_supports_adaptive_thinking(model):
+            _set_adaptive_thinking(params, effort)
+        else:
+            budget = thinking_budget_tokens(reasoning_effort)
+            if budget is None:
+                return
+            params["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            params["temperature"] = 1
+            params.pop("top_p", None)
+            params.pop("top_k", None)
+            current_max = params.get("max_tokens") or 0
+            required = budget + 1024
+            if current_max < required:
+                params["max_tokens"] = required
         return
 
-    budget = thinking_budget_tokens(reasoning_effort)
-    if budget is None:
+    if anthropic_thinking_can_disable(model) and anthropic_thinking_defaults_on(model):
+        params["thinking"] = {"type": "disabled"}
+        logger.debug(
+            "[ANTHROPIC] thinking disabled for %s (reasoning_effort unset)",
+            model,
+        )
         return
-    params["thinking"] = {"type": "enabled", "budget_tokens": budget}
-    params["temperature"] = 1
-    params.pop("top_p", None)
-    params.pop("top_k", None)
-    current_max = params.get("max_tokens") or 0
-    required = budget + 1024
-    if current_max < required:
-        params["max_tokens"] = required
+
+    if anthropic_thinking_defaults_on(model):
+        _set_adaptive_thinking(params, "low")
+        logger.debug(
+            "[ANTHROPIC] thinking minimized (effort=low) for %s (always-on model)",
+            model,
+        )
+
+
+def _apply_sampling_restrictions(params: Dict[str, Any]) -> None:
+    """Drop sampling params on models that reject non-default values."""
+    model = str(params.get("model") or "")
+    if not anthropic_rejects_sampling_params(model):
+        return
+    removed = [k for k in ("temperature", "top_p", "top_k") if k in params]
+    for key in removed:
+        params.pop(key, None)
+    if removed:
+        logger.debug(
+            "[ANTHROPIC] omitted sampling params %s for %s",
+            removed,
+            model,
+        )
 
 
 def _apply_prompt_cache(params: Dict[str, Any], enabled: bool) -> None:
@@ -204,8 +237,9 @@ def _prepare_anthropic_request_params(
     prompt_cache: bool,
 ) -> Dict[str, Any]:
     """Build a Messages API request body with thinking and cache options applied."""
+    api_model = normalize_anthropic_model_id(model)
     params: Dict[str, Any] = {
-        "model": model,
+        "model": api_model,
         "max_tokens": max_tokens or 4096,
         "messages": messages,
     }
@@ -223,6 +257,7 @@ def _prepare_anthropic_request_params(
     if out_fmt:
         params["output_format"] = out_fmt
     _apply_thinking(params, reasoning_effort)
+    _apply_sampling_restrictions(params)
     _apply_prompt_cache(params, prompt_cache)
     return params
 
