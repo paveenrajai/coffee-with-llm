@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Dict, Optional, Union, cast
+from typing import Any, AsyncIterator, Callable, Dict, Mapping, Optional, Union, cast
 
 from .rate_limit import retry_stream
 
 
 @dataclass(frozen=True)
 class TokenUsage:
-    """Token usage for a generation session (aggregated across multi-step/tool loops)."""
+    """Token usage for a generation session (aggregated across multi-step/tool loops).
+
+    Field semantics vary by provider:
+
+    - **OpenAI:** ``cached_tokens`` is often a subset of ``input_tokens``.
+    - **Anthropic (prompt cache):** ``input_tokens``, ``cached_tokens`` (cache reads),
+      and ``cache_creation_tokens`` (cache writes) are **disjoint** buckets. A large
+      system prompt on the first turn can yield tiny ``input_tokens`` with most
+      prompt tokens in ``cache_creation_tokens``.
+    - **Google:** ``cached_tokens`` reflects context-cache reads when reported.
+
+    ``total_tokens`` is ``input_tokens + output_tokens`` (legacy). It does **not**
+    include cache read/write tokens. Use :meth:`prompt_tokens` or :meth:`billable_tokens`
+    for observability and quota dashboards.
+    """
 
     input_tokens: int
     output_tokens: int
@@ -19,6 +33,61 @@ class TokenUsage:
     # Anthropic cache_creation_input_tokens (prompt cache writes); optional elsewhere.
     cache_creation_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
+
+    @property
+    def prompt_tokens(self) -> int:
+        """All prompt-side tokens: uncached input + cache reads + cache writes."""
+        return (
+            self.input_tokens
+            + (self.cached_tokens or 0)
+            + (self.cache_creation_tokens or 0)
+        )
+
+    @property
+    def billable_tokens(self) -> int:
+        """All tokens that affect billing: prompt-side + output."""
+        return self.prompt_tokens + self.output_tokens
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Observability-friendly usage payload (includes computed prompt totals)."""
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "prompt_tokens": self.prompt_tokens,
+            "billable_tokens": self.billable_tokens,
+            "cost_usd": self.cost_usd,
+        }
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> TokenUsage:
+        """Build from a dict (e.g. aggregated session totals)."""
+        input_tokens = int(raw.get("input_tokens") or 0)
+        output_tokens = int(raw.get("output_tokens") or 0)
+        total_raw = raw.get("total_tokens")
+        total_tokens = (
+            int(total_raw)
+            if total_raw is not None
+            else input_tokens + output_tokens
+        )
+        cached_raw = raw.get("cached_tokens")
+        cached_tokens = int(cached_raw) if cached_raw is not None else None
+        creation_raw = raw.get("cache_creation_tokens")
+        cache_creation_tokens = (
+            int(creation_raw) if creation_raw is not None else None
+        )
+        cost_raw = raw.get("cost_usd")
+        cost_usd = float(cost_raw) if cost_raw is not None else None
+        return cls(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+            cost_usd=cost_usd,
+        )
 
 
 @dataclass(frozen=True)
