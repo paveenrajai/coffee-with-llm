@@ -209,6 +209,9 @@ async for chunk in result:
     if isinstance(chunk, StreamTextDelta):
         print(chunk.text, end="", flush=True)
 print(f"\nUsage: {result.usage.input_tokens} in, {result.usage.output_tokens} out")
+print(f"Prompt tokens (all buckets): {result.usage.prompt_tokens}")
+print(f"Billable tokens: {result.usage.billable_tokens}")
+print(result.usage.to_dict())
 ```
 
 **Events:** Iteration yields `StreamTextDelta`, `StreamToolCallStart`, `StreamToolArgumentsDelta`, `StreamToolCallEnd`, and `StreamStepBoundary` (between tool rounds), then completes. Bare `str` from older mocks is accepted and normalized to `StreamTextDelta`.
@@ -218,6 +221,29 @@ print(f"\nUsage: {result.usage.input_tokens} in, {result.usage.output_tokens} ou
 **Gemini:** Streaming with custom tools uses function calling only (no Google Search grounding in the same streaming request).
 
 **Usage and cost:** `result.usage` (including `cost_usd`) is set when the stream finishes normally. If you stop early (`break`), call `await result.aclose()` so usage can be filled from the best-effort `StreamUsageSink` when the provider reported partial usage.
+
+### Understanding token usage
+
+`TokenUsage` exposes provider-native buckets plus computed totals:
+
+| Field | Meaning |
+|-------|---------|
+| `input_tokens` | Uncached input billed at the full input rate |
+| `cached_tokens` | Cache **reads** (discounted on Anthropic/OpenAI) |
+| `cache_creation_tokens` | Cache **writes** (Anthropic; billed at 125% of input) |
+| `output_tokens` | Generated output |
+| `total_tokens` | Legacy: `input_tokens + output_tokens` only |
+| `prompt_tokens` | All prompt-side tokens (input + cache read + cache write) |
+| `billable_tokens` | `prompt_tokens + output_tokens` |
+| `cost_usd` | Estimated USD (includes cache buckets when priced) |
+
+On Anthropic with prompt caching enabled (default), the **first** turn of a long system prompt often looks like `input_tokens=2` with most prompt tokens in `cache_creation_tokens` — not a metering bug. Use `usage.to_dict()` for logging and dashboards.
+
+```python
+payload = result.usage.to_dict()
+# {"input_tokens": 2, "output_tokens": 8158, "cache_creation_tokens": 40000,
+#  "prompt_tokens": 40002, "billable_tokens": 48160, "cost_usd": 0.28, ...}
+```
 
 Rate limits trigger retry before the first chunk.
 
