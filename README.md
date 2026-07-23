@@ -9,6 +9,7 @@ A model-agnostic Python library providing a unified API for OpenAI, Anthropic Cl
 - **Tool Calling**: Full support for OpenAI's tool calling with multi-step execution
 - **Structured Outputs**: Support for JSON schema and response formatting
 - **Caching**: Google explicit context cache; Anthropic automatic prompt cache; OpenAI passes through `cached_tokens` when present
+- **Attachments**: Send PDFs and images as input with one `Attachment` type; each provider translates it to its own native format
 - **Citations**: Automatic citation injection for Google Gemini responses
 - **Extended thinking**: Single `reasoning_effort` knob (`"low" | "medium" | "high"`) translates to OpenAI `reasoning.effort`, Anthropic adaptive `output_config.effort` (4.6+) or legacy `thinking.budget_tokens`, and Google `thinking_config`
 
@@ -198,6 +199,41 @@ Provider-specific notes:
 - **Google (Gemini 2.5+ / 3.x)** — sets `thinking_config` with
   `include_thoughts=False` so only the final answer streams to the caller.
 
+### Attachments (PDFs and images)
+
+Build one `Attachment` and it works on every provider — each translates it into its
+own native content part (Anthropic `document`/`image` blocks, OpenAI `input_file`/
+`input_image` parts, Google `inline_data` parts).
+
+```python
+from coffee_with_llm import AskLLM, Attachment
+
+llm = AskLLM(model="claude-opus-4-8")  # or gpt-…, or gemini-…
+
+result = await llm.ask(
+    prompt="Which model wins on each benchmark? Read the charts.",
+    attachments=[Attachment.from_path("model-card.pdf")],
+)
+print(result.text)
+```
+
+Construct from bytes when the file never touches disk:
+
+```python
+Attachment(data=pdf_bytes, mime_type="application/pdf", filename="report.pdf")
+```
+
+Notes:
+
+- **Input-only.** Attachments are what the model *reads*; the response is always text.
+- **Attached to the prompt turn**, never to `messages` history.
+- Works with `stream=True` — the binary goes in, the answer streams out.
+- Supported types: `application/pdf`, `image/png`, `image/jpeg`, `image/gif`, `image/webp`.
+  Anything else raises `ValidationError` before any network call.
+- Attachments are re-sent (and re-billed) on every request; providers do not index
+  or persist them. For repeated questions about the same document, enable the
+  provider's context/prompt cache.
+
 ### Streaming
 
 ```python
@@ -307,6 +343,7 @@ Generate a response from the LLM.
 - `max_effective_tool_steps` (int, optional): Maximum effective tool steps (default: 12)
 - `force_tool_use` (bool, optional): Force at least one tool call when tools provided (default: False)
 - `stream` (bool, optional): When True, return `StreamResult` (default: False)
+- `attachments` (list[Attachment], optional): PDFs or images for the model to read alongside `prompt`. Provider-agnostic — see [Attachments](#attachments-pdfs-and-images).
 
 **Returns:** `AskResult` – Object with `.text` (str) and `.usage` (TokenUsage). When `stream=True`, returns `StreamResult` – async iterable of stream events (see Streaming above); `.usage` after completion or `aclose()`.
 

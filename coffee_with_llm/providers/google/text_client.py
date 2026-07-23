@@ -11,6 +11,7 @@ import httpx
 from google import genai
 from google.genai import types
 
+from ...attachments import Attachment
 from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
@@ -35,6 +36,33 @@ from .utils.citations import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _attachment_part(attachment: Attachment) -> Dict[str, Any]:
+    """Translate one attachment into a Gemini inline_data part.
+
+    ``data`` stays raw bytes: the google-genai SDK base64-encodes it on the way
+    out, so pre-encoding here would double-encode.
+    """
+    return {
+        "inline_data": {
+            "mime_type": attachment.mime_type,
+            "data": attachment.data,
+        }
+    }
+
+
+def _user_parts(
+    text: str,
+    attachments: Optional[List[Attachment]],
+) -> List[Dict[str, Any]]:
+    """Attachment parts first, then the prompt text."""
+    parts: List[Dict[str, Any]] = []
+    if attachments:
+        parts.extend(_attachment_part(a) for a in attachments)
+    parts.append({"text": text})
+    return parts
+
 
 MAX_CACHED_CONTEXTS = 10
 CONTEXT_TTL_SECONDS = 3600  # 1 hour
@@ -348,9 +376,22 @@ class GoogleTextClient:
         messages: Optional[List[Dict[str, Any]]],
         prompt: str,
         system_instruct: str,
+        attachments: Optional[List[Attachment]] = None,
     ) -> List[Any]:
         """Build initial contents for Gemini API request."""
         out: List[Any] = []
+
+        def final_user_turn(text: str) -> Any:
+            """The prompt turn: a bare string normally, structured parts when attaching.
+
+            Gemini accepts a bare string as a whole user turn, but an attachment
+            has to ride in ``parts`` alongside the text, so attachments force the
+            structured form.
+            """
+            if not attachments:
+                return text
+            return {"role": "user", "parts": _user_parts(text, attachments)}
+
         if cached_context_name:
             if messages:
                 for msg in messages:
@@ -358,7 +399,7 @@ class GoogleTextClient:
                     content = msg.get("content", "")
                     google_role = "model" if role == "assistant" else "user"
                     out.append({"role": google_role, "parts": [{"text": content}]})
-            out.append(prompt)
+            out.append(final_user_turn(prompt))
         else:
             if messages:
                 for i, msg in enumerate(messages):
@@ -368,12 +409,14 @@ class GoogleTextClient:
                     if i == 0 and role == "user" and system_instruct:
                         content = f"{system_instruct}\n\n{content}"
                     out.append({"role": google_role, "parts": [{"text": content}]})
-                out.append({"role": "user", "parts": [{"text": prompt}]})
+                out.append(
+                    {"role": "user", "parts": _user_parts(prompt, attachments)}
+                )
             else:
                 merged = (
                     f"{system_instruct}\n\n{prompt}" if (system_instruct or "").strip() else prompt
                 )
-                out.append(merged)
+                out.append(final_user_turn(merged))
         return out
 
     def _extract_function_calls(self, resp: Any) -> List[Dict[str, Any]]:
@@ -419,6 +462,7 @@ class GoogleTextClient:
         force_tool_use: bool = False,
         temperature: Optional[float] = None,
         system_instruct: str = "",
+        attachments: Optional[List[Attachment]] = None,
     ) -> tuple[str, TokenUsage]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
@@ -432,7 +476,7 @@ class GoogleTextClient:
 
         def build_initial_contents() -> List[Any]:
             return self._build_initial_contents(
-                cached_context_name, messages, prompt, system_instruct
+                cached_context_name, messages, prompt, system_instruct, attachments
             )
 
         contents = build_initial_contents()
@@ -599,6 +643,7 @@ class GoogleTextClient:
         max_effective_tool_steps: int = 8,
         force_tool_use: bool = False,
         usage_sink: Optional[StreamUsageSink] = None,
+        attachments: Optional[List[Attachment]] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
         del presence_penalty, force_tool_use
 
@@ -616,7 +661,7 @@ class GoogleTextClient:
 
         def build_initial_contents() -> List[Any]:
             return self._build_initial_contents(
-                cached_context_name, messages, prompt, system_instruct
+                cached_context_name, messages, prompt, system_instruct, attachments
             )
 
         contents = build_initial_contents()

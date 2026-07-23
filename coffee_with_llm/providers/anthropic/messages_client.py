@@ -1,4 +1,9 @@
-"""Anthropic Claude provider using Messages API with tool use support."""
+"""Anthropic Claude provider using Messages API with tool use support.
+
+Attachments become ``document``/``image`` content blocks placed **before** the
+prompt text: Anthropic documents PDFs-before-text as the higher-accuracy
+ordering.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ import json
 import logging
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
+from ...attachments import Attachment
 from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
@@ -161,6 +167,33 @@ def _apply_sampling_restrictions(params: Dict[str, Any]) -> None:
             removed,
             model,
         )
+
+
+def _attachment_block(attachment: Attachment) -> Dict[str, Any]:
+    """Translate one attachment into an Anthropic content block."""
+    source = {
+        "type": "base64",
+        "media_type": attachment.mime_type,
+        "data": attachment.to_base64(),
+    }
+    block_type = "image" if attachment.kind == "image" else "document"
+    block: Dict[str, Any] = {"type": block_type, "source": source}
+    # Anthropic shows `title` to the model for documents; images have no such field.
+    if block_type == "document" and attachment.filename:
+        block["title"] = attachment.filename
+    return block
+
+
+def _user_content(
+    prompt: str,
+    attachments: Optional[List[Attachment]],
+) -> Union[str, List[Dict[str, Any]]]:
+    """Build user content, keeping the plain-string form when there is nothing to attach."""
+    if not attachments:
+        return prompt
+    blocks: List[Dict[str, Any]] = [_attachment_block(a) for a in attachments]
+    blocks.append({"type": "text", "text": prompt})
+    return blocks
 
 
 def _apply_prompt_cache(params: Dict[str, Any], enabled: bool) -> None:
@@ -333,8 +366,9 @@ class AnthropicMessagesClient:
         self,
         prompt: str,
         messages: Optional[List[Dict[str, Any]]],
+        attachments: Optional[List[Attachment]] = None,
     ) -> List[Dict[str, Any]]:
-        """Build message list from history + prompt."""
+        """Build message list from history + prompt (+ attachments on the prompt)."""
         out: List[Dict[str, Any]] = []
         if messages:
             for msg in messages:
@@ -344,7 +378,7 @@ class AnthropicMessagesClient:
                     out.append({"role": "assistant", "content": content})
                 else:
                     out.append({"role": "user", "content": content})
-        out.append({"role": "user", "content": prompt})
+        out.append({"role": "user", "content": _user_content(prompt, attachments)})
         return out
 
     def _content_to_text(self, content: Any) -> str:
@@ -479,6 +513,7 @@ class AnthropicMessagesClient:
         force_tool_use: bool = False,
         temperature: Optional[float] = None,
         system_instruct: str = "",
+        attachments: Optional[List[Attachment]] = None,
     ) -> tuple[str, TokenUsage]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
@@ -494,7 +529,7 @@ class AnthropicMessagesClient:
             raise APIError(f"Failed to initialize Anthropic client: {e}") from e
 
         anthropic_tools = _convert_tools_to_anthropic(tools_schema or [])
-        base_messages = self._build_messages(prompt, messages)
+        base_messages = self._build_messages(prompt, messages, attachments)
 
         system = (instructions or "").strip() or None
         params = _prepare_anthropic_request_params(
@@ -738,6 +773,7 @@ class AnthropicMessagesClient:
         max_effective_tool_steps: int = 8,
         force_tool_use: bool = False,
         usage_sink: Optional[StreamUsageSink] = None,
+        attachments: Optional[List[Attachment]] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
         del presence_penalty  # Anthropic Messages has no equivalent
 
@@ -755,7 +791,7 @@ class AnthropicMessagesClient:
             raise APIError(f"Failed to initialize Anthropic client: {e}") from e
 
         anthropic_tools = _convert_tools_to_anthropic(tools_schema or [])
-        base_messages = self._build_messages(prompt, messages)
+        base_messages = self._build_messages(prompt, messages, attachments)
         use_tools = bool(anthropic_tools and execute_tool_cb)
 
         total_input = 0
