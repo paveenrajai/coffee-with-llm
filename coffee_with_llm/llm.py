@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
+from .attachments import Attachment, normalize_attachments
 from .config import Config
 from .cost import estimate_cost
 from .exceptions import APIError, ConfigurationError, RateLimitError, ValidationError
@@ -125,6 +126,7 @@ class AskLLM:
         max_effective_tool_steps: int = 12,
         force_tool_use: bool = False,
         stream: bool = False,
+        attachments: Optional[List[Attachment]] = None,
     ) -> Union[AskResult, StreamResult]:
         """
         Ask the LLM a question.
@@ -154,6 +156,11 @@ class AskLLM:
             stream: When True, return StreamResult (async iterable of stream events; usage
                 after iteration or aclose). Supports tools_schema and response_format when
                 the provider allows; requires execute_tool_cb if tools_schema is set.
+            attachments: :class:`~coffee_with_llm.attachments.Attachment` objects (PDFs or
+                images) the model should read alongside ``prompt``. Provider-agnostic —
+                each provider translates them into its own native content parts, and each
+                attaches them to the prompt turn, not to ``messages`` history. Attachments
+                are input-only; the response is always text. Works with ``stream=True``.
 
         Returns:
             AskResult with text and token usage, or StreamResult when stream=True.
@@ -183,6 +190,8 @@ class AskLLM:
         if stream and tools_schema and not execute_tool_cb:
             raise ValidationError("execute_tool_cb is required when stream=True with tools_schema")
 
+        resolved_attachments = normalize_attachments(attachments)
+
         # Rate limiting: wait if needed before making API call
         await self._wait_if_needed()
 
@@ -203,6 +212,7 @@ class AskLLM:
                 max_steps=max_steps,
                 max_effective_tool_steps=max_effective_tool_steps,
                 force_tool_use=force_tool_use,
+                attachments=resolved_attachments,
             )
 
         async def _generate() -> AskResult:
@@ -224,6 +234,7 @@ class AskLLM:
                 force_tool_use=force_tool_use,
                 temperature=temperature,
                 system_instruct=system_instruct or "",
+                attachments=list(resolved_attachments) or None,
             )
             text, usage = (
                 result if isinstance(result, tuple) else (result, TokenUsage(0, 0, 0, None))
@@ -270,6 +281,7 @@ class AskLLM:
         max_steps: int = 24,
         max_effective_tool_steps: int = 12,
         force_tool_use: bool = False,
+        attachments: tuple[Attachment, ...] = (),
     ) -> StreamResult:
         """Stream events with usage and rate-limit retry."""
 
@@ -295,6 +307,7 @@ class AskLLM:
                 max_effective_tool_steps=max_effective_tool_steps,
                 force_tool_use=force_tool_use,
                 usage_sink=usage_sink,
+                attachments=list(attachments) or None,
             )
 
         return StreamResult(

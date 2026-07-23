@@ -1,3 +1,4 @@
+from .attachments import Attachment
 from .config import Config
 from .cost import estimate_cost
 from .exceptions import APIError, AskLLMError, ConfigurationError, RateLimitError, ValidationError
@@ -14,11 +15,12 @@ from .types import (
     TokenUsage,
 )
 
-__version__ = "0.5.3"
+__version__ = "0.6.0"
 
 __all__ = [
     "__version__",
     "AskLLM",
+    "Attachment",
     "Config",
     "estimate_cost",
     "AskLLMError",

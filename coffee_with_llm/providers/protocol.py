@@ -14,6 +14,7 @@ from typing import (
     runtime_checkable,
 )
 
+from ..attachments import Attachment
 from ..types import StreamUsageSink, TokenUsage
 
 
@@ -43,6 +44,7 @@ class ProviderProtocol(Protocol):
         force_tool_use: bool = False,
         temperature: Optional[float] = None,
         system_instruct: str = "",
+        attachments: Optional[List[Attachment]] = None,
     ) -> tuple[str, TokenUsage]:
         """Generate text. Returns (text, usage)."""
         ...
@@ -70,6 +72,7 @@ class ProviderProtocol(Protocol):
         max_effective_tool_steps: int = 12,
         force_tool_use: bool = False,
         usage_sink: Optional[StreamUsageSink] = None,
+        attachments: Optional[List[Attachment]] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
         """Stream :class:`~coffee_with_llm.types.StreamEvent` chunks, then terminal ``TokenUsage``.
 

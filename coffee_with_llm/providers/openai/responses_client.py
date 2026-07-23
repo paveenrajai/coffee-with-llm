@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
+from ...attachments import Attachment
 from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
@@ -23,6 +24,41 @@ from ..tool_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _attachment_part(attachment: Attachment) -> Dict[str, Any]:
+    """Translate one attachment into an OpenAI Responses content part."""
+    if attachment.kind == "image":
+        return {"type": "input_image", "image_url": attachment.to_data_url()}
+    return {
+        "type": "input_file",
+        # The Responses API requires a filename alongside inline file_data.
+        "filename": attachment.filename or "attachment.pdf",
+        "file_data": attachment.to_data_url(),
+    }
+
+
+def _build_input_list(
+    prompt: str,
+    messages: Optional[List[Dict[str, Any]]],
+    attachments: Optional[List[Attachment]] = None,
+) -> List[Dict[str, Any]]:
+    """Build the Responses ``input`` list from history + prompt (+ attachments)."""
+    input_list: List[Dict[str, Any]] = []
+    if messages:
+        for msg in messages:
+            input_list.append(
+                {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+            )
+
+    if attachments:
+        content: Any = [_attachment_part(a) for a in attachments]
+        content.append({"type": "input_text", "text": prompt})
+    else:
+        content = prompt
+    input_list.append({"role": "user", "content": content})
+    return input_list
+
 
 REASONING_LOG_TOOL_NAME = "reasoning_log"
 REASONING_PREVIEW_LENGTH = 200
@@ -314,6 +350,7 @@ class OpenAIResponsesClient:
         force_tool_use: bool = False,
         temperature: Optional[float] = None,
         system_instruct: str = "",
+        attachments: Optional[List[Attachment]] = None,
     ) -> tuple[str, TokenUsage]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
@@ -329,26 +366,7 @@ class OpenAIResponsesClient:
         except Exception as e:
             raise APIError(f"Failed to initialize OpenAI client: {e}") from e
 
-        # Build input list from conversation history + current prompt
-        input_list: List[Dict[str, Any]] = []
-
-        # Add conversation history if provided
-        if messages:
-            for msg in messages:
-                input_list.append(
-                    {
-                        "role": msg.get("role", "user"),
-                        "content": msg.get("content", ""),
-                    }
-                )
-
-        # Add current prompt as the latest user message
-        input_list.append(
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        )
+        input_list = _build_input_list(prompt, messages, attachments)
 
         base_input: List[Dict[str, Any]] = [dict(m) for m in input_list]
 
@@ -620,6 +638,7 @@ class OpenAIResponsesClient:
         max_effective_tool_steps: int = 8,
         force_tool_use: bool = False,
         usage_sink: Optional[StreamUsageSink] = None,
+        attachments: Optional[List[Attachment]] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
         """Stream ``StreamEvent`` chunks, then terminal ``TokenUsage``."""
         del temperature, force_tool_use  # OpenAI; unused here
@@ -637,13 +656,7 @@ class OpenAIResponsesClient:
         except Exception as e:
             raise APIError(f"Failed to initialize OpenAI client: {e}") from e
 
-        input_list: List[Dict[str, Any]] = []
-        if messages:
-            for msg in messages:
-                input_list.append(
-                    {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-                )
-        input_list.append({"role": "user", "content": prompt})
+        input_list = _build_input_list(prompt, messages, attachments)
         base_input: List[Dict[str, Any]] = [dict(m) for m in input_list]
 
         params: Dict[str, Any] = {"model": model, "input": input_list}
