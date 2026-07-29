@@ -19,6 +19,7 @@ class TestConfigFromEnv:
                 "OPENAI_API_KEY": "sk-test",
                 "ANTHROPIC_API_KEY": "sk-ant-test",
                 "GOOGLE_API_KEY": "test-google-key",
+                "INCEPTION_API_KEY": "inc-test",
             },
             clear=False,
         ):
@@ -26,6 +27,7 @@ class TestConfigFromEnv:
             assert cfg.openai_api_key == "sk-test"
             assert cfg.anthropic_api_key == "sk-ant-test"
             assert cfg.google_api_key == "test-google-key"
+            assert cfg.inception_api_key == "inc-test"
 
     def test_request_timeout_from_env(self):
         """COFFEE_REQUEST_TIMEOUT env is parsed."""
@@ -104,3 +106,12 @@ class TestConfigRequireKeys:
         """require_google_key returns key when present."""
         cfg = Config(google_api_key="test-google-key")
         assert cfg.require_google_key() == "test-google-key"
+
+    def test_require_inception_key_raises_when_missing(self):
+        cfg = Config(inception_api_key=None)
+        with pytest.raises(ConfigurationError, match="Inception.*not configured"):
+            cfg.require_inception_key()
+
+    def test_require_inception_key_returns_when_present(self):
+        cfg = Config(inception_api_key="inc-test")
+        assert cfg.require_inception_key() == "inc-test"

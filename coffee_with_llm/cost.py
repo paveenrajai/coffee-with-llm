@@ -42,6 +42,10 @@ _MODEL_PRICING: list[Tuple[str, float, float, Optional[float]]] = [
     ("gemini-flash-lite", 0.10, 0.40, 0.01),
     ("gemini-flash", 0.30, 2.50, 0.03),
     ("gemini-pro", 1.25, 10.00, 0.125),
+    # Inception (docs.inceptionlabs.ai/get-started/models)
+    ("mercury-2", 0.25, 0.75, 0.025),
+    ("mercury-edit-2", 0.25, 0.75, 0.025),
+    ("mercury", 0.25, 0.75, 0.025),
 ]
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "coffee_with_llm"
-version = "0.6.0"
+version = "0.7.0"
 description = "A model-agnostic Python library with a unified API for multiple LLM providers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,7 +8,7 @@ authors = [
     { name = "Paveen Rajai" }
 ]
 license = { text = "MIT" }
-keywords = ["llm", "openai", "anthropic", "claude", "gemini", "ai", "language-model", "chatgpt"]
+keywords = ["llm", "openai", "anthropic", "claude", "gemini", "inception", "mercury", "ai", "language-model", "chatgpt"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -25,6 +25,7 @@ dependencies = [
     "openai>=1.52.0",
     "google-genai>=0.3.0",
     "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -83,6 +84,10 @@ disable_error_code = [
     "index",
     "return-value",
 ]
+
+[[tool.mypy.overrides]]
+module = ["dotenv.*"]
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]
