@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional
 from ..exceptions import ValidationError
 from .anthropic import AnthropicMessagesClient
 from .google import GoogleTextClient
+from .inception import InceptionChatClient
 from .openai import OpenAIResponsesClient
 from .protocol import ProviderProtocol
 
@@ -14,7 +15,9 @@ if TYPE_CHECKING:
     from ..config import Config
 
 # First path segment must be one of these to treat ``provider/model`` as a prefix form.
-_PROVIDER_PREFIXES = frozenset({"anthropic", "claude", "gemini", "google", "openai"})
+_PROVIDER_PREFIXES = frozenset(
+    {"anthropic", "claude", "gemini", "google", "inception", "openai"}
+)
 
 
 def split_provider_model(model: str) -> tuple[str, str]:
@@ -54,6 +57,10 @@ def _route_is_google(route_key: str) -> bool:
     return route_key in ("google", "gemini") or route_key.startswith(("gemini", "google"))
 
 
+def _route_is_inception(route_key: str) -> bool:
+    return route_key in ("inception",) or route_key.startswith(("mercury", "inception"))
+
+
 def get_provider(
     model: str,
     config: "Config",
@@ -81,4 +88,6 @@ def get_provider(
             google_inline_citations=google_inline_citations,
             google_attach_search_tool=google_attach_search_tool,
         )
+    if _route_is_inception(route_key):
+        return InceptionChatClient(**kwargs)
     return OpenAIResponsesClient(**kwargs)

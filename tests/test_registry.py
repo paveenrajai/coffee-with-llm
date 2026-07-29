@@ -9,6 +9,7 @@ from coffee_with_llm import Config
 from coffee_with_llm.exceptions import ValidationError
 from coffee_with_llm.providers.anthropic import AnthropicMessagesClient
 from coffee_with_llm.providers.google import GoogleTextClient
+from coffee_with_llm.providers.inception import InceptionChatClient
 from coffee_with_llm.providers.openai import OpenAIResponsesClient
 from coffee_with_llm.providers.protocol import ProviderProtocol
 from coffee_with_llm.providers.registry import get_provider, split_provider_model
@@ -87,6 +88,20 @@ class TestGetProvider:
                 client = get_provider("claude/claude-sonnet-4-6", _config())
                 assert isinstance(client, AnthropicMessagesClient)
 
+    def test_mercury_model_returns_inception_client(self):
+        """mercury-* returns InceptionChatClient."""
+        with patch.dict("os.environ", {"INCEPTION_API_KEY": "test"}):
+            with patch("openai.AsyncOpenAI"):
+                client = get_provider("mercury-2", _config())
+                assert isinstance(client, InceptionChatClient)
+
+    def test_prefixed_inception_returns_inception_client(self):
+        """inception/<id> returns InceptionChatClient."""
+        with patch.dict("os.environ", {"INCEPTION_API_KEY": "test"}):
+            with patch("openai.AsyncOpenAI"):
+                client = get_provider("inception/mercury-2", _config())
+                assert isinstance(client, InceptionChatClient)
+
 
 class TestSplitProviderModel:
     """Tests for split_provider_model."""
@@ -96,6 +111,9 @@ class TestSplitProviderModel:
 
     def test_strips_openai_prefix(self):
         assert split_provider_model("openai/gpt-4o-mini") == ("gpt-4o-mini", "openai")
+
+    def test_strips_inception_prefix(self):
+        assert split_provider_model("inception/mercury-2") == ("mercury-2", "inception")
 
     def test_unknown_prefix_not_split(self):
         assert split_provider_model("foo/bar") == ("foo/bar", "foo/bar")

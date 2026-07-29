@@ -70,3 +70,15 @@ class TestEstimateCost:
         usage = TokenUsage(1000, 100, 1100, None)
         cost = estimate_cost(usage, "gpt-4o-mini-2024-01")
         assert cost is not None
+
+    def test_mercury_pricing(self):
+        usage = TokenUsage(1_000_000, 1_000_000, 2_000_000, None)
+        cost = estimate_cost(usage, "mercury-2")
+        assert cost == round(0.25 + 0.75, 6)
+
+    def test_mercury_cached_pricing(self):
+        usage = TokenUsage(1_000_000, 0, 1_000_000, 500_000)
+        cost = estimate_cost(usage, "mercury-2")
+        # 500k uncached @ 0.25 + 500k cached @ 0.025
+        expected = (500_000 / 1_000_000) * 0.25 + (500_000 / 1_000_000) * 0.025
+        assert cost == round(expected, 6)

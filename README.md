@@ -1,17 +1,17 @@
 # coffee_with_llm
 
-A model-agnostic Python library providing a unified API for OpenAI, Anthropic Claude, and Google Gemini.
+A model-agnostic Python library providing a unified API for OpenAI, Anthropic Claude, Google Gemini, and Inception Mercury.
 
 ## Features
 
 - **Model-agnostic**: Picks the provider from the model id, or from an explicit `provider/model` prefix (see below)
-- **Unified API**: Same interface for OpenAI, Anthropic Claude, and Google Gemini
+- **Unified API**: Same interface for OpenAI, Anthropic Claude, Google Gemini, and Inception Mercury
 - **Tool Calling**: Full support for OpenAI's tool calling with multi-step execution
 - **Structured Outputs**: Support for JSON schema and response formatting
-- **Caching**: Google explicit context cache; Anthropic automatic prompt cache; OpenAI passes through `cached_tokens` when present
-- **Attachments**: Send PDFs and images as input with one `Attachment` type; each provider translates it to its own native format
+- **Caching**: Google explicit context cache; Anthropic automatic prompt cache; OpenAI/Inception pass through `cached_tokens` when present
+- **Attachments**: Send PDFs and images as input with one `Attachment` type; each provider translates it to its own native format (Inception Mercury is text-only)
 - **Citations**: Automatic citation injection for Google Gemini responses
-- **Extended thinking**: Single `reasoning_effort` knob (`"low" | "medium" | "high"`) translates to OpenAI `reasoning.effort`, Anthropic adaptive `output_config.effort` (4.6+) or legacy `thinking.budget_tokens`, and Google `thinking_config`
+- **Extended thinking**: Single `reasoning_effort` knob (`"low" | "medium" | "high"`, plus `"instant"` on Inception) translates to OpenAI `reasoning.effort`, Anthropic adaptive `output_config.effort` (4.6+) or legacy `thinking.budget_tokens`, Google `thinking_config`, and Inception `reasoning_effort`
 
 ## Installation
 
@@ -64,19 +64,32 @@ You can force the provider and pass the **exact API model id** with a single sla
 | `openai/`   | OpenAI    | `openai/gpt-4o-mini` |
 | `anthropic/`| Anthropic | `anthropic/claude-sonnet-4-6` |
 | `claude/`   | Anthropic | `claude/claude-sonnet-4-6` |
+| `inception/`| Inception | `inception/mercury-2` |
 
-Only the segment **after** the first `/` is sent to the provider API (e.g. `google/gemma-2-9b-it` → API model `gemma-2-9b-it`). If the prefix is missing or unknown, the whole string is used for both routing and the API (legacy behavior: ids like `gpt-4o-mini`, `claude-…`, `gemini-…`, `google-…` still auto-route).
+Only the segment **after** the first `/` is sent to the provider API (e.g. `google/gemma-2-9b-it` → API model `gemma-2-9b-it`). If the prefix is missing or unknown, the whole string is used for both routing and the API (legacy behavior: ids like `gpt-4o-mini`, `claude-…`, `gemini-…`, `google-…`, `mercury-…` still auto-route).
 
 An empty id after the prefix (e.g. `google/`) is rejected with `ValidationError`.
 
 ## Configuration
 
-Set environment variables for API keys:
+Copy `.env.example` to `.env` and set the keys you need. `Config.from_env()` loads
+`.env` automatically — no `export` required.
 
 ```bash
-export OPENAI_API_KEY="your-openai-key"
-export ANTHROPIC_API_KEY="your-anthropic-key"
-export GOOGLE_API_KEY="your-google-key"
+cp .env.example .env
+```
+
+```env
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GOOGLE_API_KEY=...
+INCEPTION_API_KEY=...
+```
+
+Smoke-test Inception wiring (live API)::
+
+```bash
+python scripts/test_inception_wiring.py
 ```
 
 ## Usage Examples
@@ -122,7 +135,7 @@ response = await llm.ask(
 )
 ```
 
-### Tool Calling (OpenAI, Anthropic, Google)
+### Tool Calling (OpenAI, Anthropic, Google, Inception)
 
 ```python
 def get_weather(location: str) -> dict:
@@ -160,18 +173,20 @@ response = await llm.ask(
 
 ### Extended Thinking (provider-agnostic)
 
-`reasoning_effort` is a single string — `"low"`, `"medium"`, or `"high"` — that
-each provider translates to its native extended-thinking config. Pass `None`
-(or omit) to disable. Unknown values are ignored with a warning.
+`reasoning_effort` is a single string — `"low"`, `"medium"`, or `"high"` (Inception
+also accepts `"instant"`) — that each provider translates to its native
+extended-thinking config. Pass `None` (or omit) to disable. Unknown values are
+ignored with a warning.
 
-| Effort   | Anthropic (4.6+)     | Anthropic (legacy) / Google |
-|----------|----------------------|-----------------------------|
-| `low`    | `output_config.effort` | 1,024 token budget          |
-| `medium` | (adaptive thinking)  | 4,096 token budget          |
-| `high`   |                      | 16,384 token budget         |
+| Effort   | Anthropic (4.6+)     | Anthropic (legacy) / Google | Inception |
+|----------|----------------------|-----------------------------|-----------|
+| `instant`| —                    | —                           | `reasoning_effort=instant` |
+| `low`    | `output_config.effort` | 1,024 token budget          | `reasoning_effort=low` |
+| `medium` | (adaptive thinking)  | 4,096 token budget          | `reasoning_effort=medium` |
+| `high`   |                      | 16,384 token budget         | `reasoning_effort=high` |
 
 ```python
-# Same call works on OpenAI, Anthropic, or Google
+# Same call works on OpenAI, Anthropic, Google, or Inception
 llm = AskLLM(model="anthropic/claude-sonnet-4-6")
 response = await llm.ask(
     prompt="Solve this math problem: 2x + 5 = 15",
@@ -198,12 +213,16 @@ Provider-specific notes:
   `cache_creation_tokens` reflects cache writes; both are included in `cost_usd`.
 - **Google (Gemini 2.5+ / 3.x)** — sets `thinking_config` with
   `include_thoughts=False` so only the final answer streams to the caller.
+- **Inception (Mercury)** — passed as `reasoning_effort` on Chat Completions
+  (`instant` | `low` | `medium` | `high`). Supports tool calling and structured
+  outputs; text-only (no attachments).
 
 ### Attachments (PDFs and images)
 
-Build one `Attachment` and it works on every provider — each translates it into its
-own native content part (Anthropic `document`/`image` blocks, OpenAI `input_file`/
-`input_image` parts, Google `inline_data` parts).
+Build one `Attachment` and it works on OpenAI, Anthropic, and Google — each
+translates it into its own native content part (Anthropic `document`/`image`
+blocks, OpenAI `input_file`/`input_image` parts, Google `inline_data` parts).
+Inception Mercury is text-only and raises `ValidationError` if attachments are passed.
 
 ```python
 from coffee_with_llm import AskLLM, Attachment
@@ -303,6 +322,12 @@ Rate limits trigger retry before the first chunk.
 - Any Gemini id the API accepts (`gemini-…` or `google-…` still auto-routes to Google)
 - **Gemma** and other non-`gemini` Google ids: use the prefix form, e.g. `google/gemma-2-9b-it`, so routing hits Google and the API receives `gemma-2-9b-it`
 
+### Inception (Mercury)
+- `mercury-2` (chat; also `inception/mercury-2`)
+- Short alias: `mercury` → `mercury-2`
+- `mercury-*` ids auto-route to Inception
+- Text-only Chat Completions (tool calling + structured outputs + `reasoning_effort`)
+
 ## API Reference
 
 ### `AskLLM`
@@ -312,7 +337,7 @@ Rate limits trigger retry before the first chunk.
 Initialize the LLM client.
 
 **Parameters:**
-- `model` (str): Model name (required). Optional `provider/model` form (see [Provider prefix](#provider-prefix-providermodel)); otherwise provider is inferred from the id (`gpt-…`, `claude-…`, `gemini-…`, `google-…`, etc.).
+- `model` (str): Model name (required). Optional `provider/model` form (see [Provider prefix](#provider-prefix-providermodel)); otherwise provider is inferred from the id (`gpt-…`, `claude-…`, `gemini-…`, `google-…`, `mercury-…`, etc.).
 - `config` (Config, optional): Config instance. If None, uses `Config.from_env()` for API keys
 - `min_delay_between_calls` (float, optional): Min delay between API calls in seconds (default: 1.0)
 - `max_retries` (int, optional): Max retries for rate limit errors (default: 3)
@@ -334,10 +359,10 @@ Generate a response from the LLM.
 - `temperature` (float, optional): Sampling temperature (0-2)
 - `top_p` (float, optional): Nucleus sampling parameter
 - `presence_penalty` (float, optional): Presence penalty (OpenAI only)
-- `reasoning_effort` (str, optional): Extended-thinking effort, `"low" | "medium" | "high"`. Provider-agnostic — see [Extended Thinking](#extended-thinking-provider-agnostic).
-- `tools_schema` (list, optional): Tool/function calling schema (OpenAI, Anthropic, Google)
+- `reasoning_effort` (str, optional): Extended-thinking effort, `"low" | "medium" | "high"` (Inception also: `"instant"`). Provider-agnostic — see [Extended Thinking](#extended-thinking-provider-agnostic).
+- `tools_schema` (list, optional): Tool/function calling schema (OpenAI, Anthropic, Google, Inception)
 - `response_format` (dict, optional): Response format specification
-- `execute_tool_cb` (callable, optional): Tool execution callback (OpenAI, Anthropic, Google)
+- `execute_tool_cb` (callable, optional): Tool execution callback (OpenAI, Anthropic, Google, Inception)
 - `tool_error_callback` (callable, optional): Callback when tool returns ok=False
 - `max_steps` (int, optional): Maximum tool-calling steps (default: 24)
 - `max_effective_tool_steps` (int, optional): Maximum effective tool steps (default: 12)
@@ -354,9 +379,12 @@ Generate a response from the LLM.
 
 ## Environment Variables
 
+Loaded from `.env` (see `.env.example`) or the process environment:
+
 - `OPENAI_API_KEY`: OpenAI API key (required for OpenAI models)
 - `ANTHROPIC_API_KEY`: Anthropic API key (required for Claude models)
 - `GOOGLE_API_KEY`: Google API key (required for Google models)
+- `INCEPTION_API_KEY`: Inception API key (required for Mercury models)
 
 Provider options (`google_explicit_cache`, `google_inline_citations`, `anthropic_prompt_cache`) are passed as constructor params to `AskLLM`; see docstring.
 
