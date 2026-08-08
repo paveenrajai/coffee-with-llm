@@ -42,7 +42,7 @@ ENV/
 .coverage
 htmlcov/
 .tox/
-temp-scripts/
+scripts/
 
 # Distribution
 dist/

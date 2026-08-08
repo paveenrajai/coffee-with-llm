@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Optional
 
 from ..exceptions import ValidationError
 from .anthropic import AnthropicMessagesClient
-from .google import GoogleTextClient
+from .google import GoogleInteractionsClient, GoogleTextClient
+from .google.api_mode import DEFAULT_GOOGLE_API_MODE, GoogleApiMode
 from .inception import InceptionChatClient
 from .openai import OpenAIResponsesClient
 from .protocol import ProviderProtocol
@@ -61,6 +62,28 @@ def _route_is_inception(route_key: str) -> bool:
     return route_key in ("inception",) or route_key.startswith(("mercury", "inception"))
 
 
+def get_google_interactions_client(
+    model: str,
+    config: "Config",
+    *,
+    request_timeout: Optional[float] = None,
+    google_attach_search_tool: bool = True,
+) -> GoogleInteractionsClient:
+    """Interactions API client for a Google/Gemini model (independent of ``google_api_mode``)."""
+    _, route_key = split_provider_model(model)
+    if not _route_is_google(route_key):
+        raise ValidationError(
+            f"Interactions API is only available for Google/Gemini models, not {model!r}."
+        )
+    kwargs: dict = {"config": config}
+    if request_timeout is not None:
+        kwargs["request_timeout"] = request_timeout
+    return GoogleInteractionsClient(
+        **kwargs,
+        google_attach_search_tool=google_attach_search_tool,
+    )
+
+
 def get_provider(
     model: str,
     config: "Config",
@@ -70,6 +93,7 @@ def get_provider(
     google_inline_citations: bool = True,
     google_attach_search_tool: bool = True,
     anthropic_prompt_cache: bool = True,
+    google_api_mode: GoogleApiMode = DEFAULT_GOOGLE_API_MODE,
 ) -> ProviderProtocol:
     """Return the appropriate provider client for the given model name."""
     _, route_key = split_provider_model(model)
@@ -82,6 +106,11 @@ def get_provider(
             anthropic_prompt_cache=anthropic_prompt_cache,
         )
     if _route_is_google(route_key):
+        if google_api_mode == "interactions":
+            return GoogleInteractionsClient(
+                **kwargs,
+                google_attach_search_tool=google_attach_search_tool,
+            )
         return GoogleTextClient(
             **kwargs,
             google_explicit_cache=google_explicit_cache,

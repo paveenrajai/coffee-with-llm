@@ -186,6 +186,8 @@ class AskResult:
 
     text: str
     usage: TokenUsage
+    #: Set when the call used Gemini Interactions API (for multi-turn continuation).
+    interaction_id: Optional[str] = None
 
     def __str__(self) -> str:
         return self.text
