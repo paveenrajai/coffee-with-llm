@@ -9,7 +9,10 @@ from .attachments import Attachment, normalize_attachments
 from .config import Config
 from .cost import estimate_cost
 from .exceptions import APIError, ConfigurationError, RateLimitError, ValidationError
-from .providers.registry import get_provider, split_provider_model
+from .providers.google.api_mode import DEFAULT_GOOGLE_API_MODE, GoogleApiMode
+from .providers.google.interactions_client import GoogleInteractionsClient
+from .providers.google.text_client import GoogleTextClient
+from .providers.registry import get_google_interactions_client, get_provider, split_provider_model
 from .rate_limit import is_rate_limit_error, with_retry
 from .types import AskResult, StreamResult, StreamUsageSink, TokenUsage
 
@@ -49,6 +52,7 @@ class AskLLM:
         google_inline_citations: bool = True,
         google_attach_search_tool: bool = True,
         anthropic_prompt_cache: bool = True,
+        google_api_mode: GoogleApiMode = DEFAULT_GOOGLE_API_MODE,
     ) -> None:
         """
         Initialize AskLLM with a model.
@@ -67,6 +71,9 @@ class AskLLM:
             google_inline_citations: Inject [cite: url] for Gemini grounding (default: True)
             google_attach_search_tool: When using Gemini with no custom tools, attach the
                 Google Search tool (default: True). Ignored for non-Google models.
+            google_api_mode: For Gemini only, ``"generate_content"`` (default) uses the
+                classic Models API; ``"interactions"`` routes :meth:`ask` to the
+                Interactions API. :meth:`ask_interaction` always uses Interactions.
             anthropic_prompt_cache: Enable Anthropic automatic prompt caching via top-level
                 ``cache_control`` (default: True). Ignored for non-Anthropic models.
 
@@ -83,11 +90,15 @@ class AskLLM:
             raise ValidationError("Model name is required")
 
         self._model = api_model
+        self._model_str = model_str
         self._min_delay = min_delay_between_calls
         self._max_retries = max_retries
         self._last_call_time: Optional[float] = None
+        self._google_api_mode = google_api_mode
+        self._google_attach_search_tool = google_attach_search_tool
 
         cfg = (config or Config.from_env()).with_request_timeout(request_timeout)
+        self._config = cfg
         self._request_timeout = cfg.request_timeout
 
         try:
@@ -99,7 +110,9 @@ class AskLLM:
                 google_inline_citations=google_inline_citations,
                 google_attach_search_tool=google_attach_search_tool,
                 anthropic_prompt_cache=anthropic_prompt_cache,
+                google_api_mode=google_api_mode,
             )
+            self._interactions_client: GoogleInteractionsClient | None = None
         except Exception as e:
             raise ConfigurationError(
                 f"Failed to initialize client for model '{model_str}': {e}"
@@ -127,6 +140,7 @@ class AskLLM:
         force_tool_use: bool = False,
         stream: bool = False,
         attachments: Optional[List[Attachment]] = None,
+        google_attach_search_tool: Optional[bool] = None,
     ) -> Union[AskResult, StreamResult]:
         """
         Ask the LLM a question.
@@ -156,11 +170,8 @@ class AskLLM:
             stream: When True, return StreamResult (async iterable of stream events; usage
                 after iteration or aclose). Supports tools_schema and response_format when
                 the provider allows; requires execute_tool_cb if tools_schema is set.
-            attachments: :class:`~coffee_with_llm.attachments.Attachment` objects (PDFs or
-                images) the model should read alongside ``prompt``. Provider-agnostic —
-                each provider translates them into its own native content parts, and each
-                attaches them to the prompt turn, not to ``messages`` history. Attachments
-                are input-only; the response is always text. Works with ``stream=True``.
+            google_attach_search_tool: When set, overrides the constructor default for
+                Gemini only (attach or omit the Google Search tool for this call).
 
         Returns:
             AskResult with text and token usage, or StreamResult when stream=True.
@@ -216,6 +227,11 @@ class AskLLM:
             )
 
         async def _generate() -> AskResult:
+            generate_kwargs: Dict[str, Any] = {}
+            if google_attach_search_tool is not None and isinstance(
+                self._client, (GoogleTextClient, GoogleInteractionsClient)
+            ):
+                generate_kwargs["include_google_search"] = google_attach_search_tool
             result = await self._client.generate(
                 prompt=prompt,
                 model=self._model,
@@ -235,6 +251,7 @@ class AskLLM:
                 temperature=temperature,
                 system_instruct=system_instruct or "",
                 attachments=list(resolved_attachments) or None,
+                **generate_kwargs,
             )
             text, usage = (
                 result if isinstance(result, tuple) else (result, TokenUsage(0, 0, 0, None))
@@ -260,6 +277,73 @@ class AskLLM:
                 ) from e
             logger.error(f"API call failed for model '{self._model}': {e}")
             raise APIError(f"Failed to generate response: {e}") from e
+
+    def _get_interactions_client(self) -> GoogleInteractionsClient:
+        if self._interactions_client is None:
+            self._interactions_client = get_google_interactions_client(
+                self._model_str,
+                self._config,
+                request_timeout=self._request_timeout,
+                google_attach_search_tool=self._google_attach_search_tool,
+            )
+        return self._interactions_client
+
+    async def ask_interaction(
+        self,
+        *,
+        prompt: str,
+        system_instruct: str = "",
+        previous_interaction_id: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        tools_schema: Optional[List[Dict[str, Any]]] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+        max_steps: int = 16,
+        google_attach_search_tool: Optional[bool] = None,
+    ) -> AskResult:
+        """Ask via Gemini Interactions API (server-side session state).
+
+        Use ``previous_interaction_id`` from a prior :class:`AskResult` to continue
+        a multi-turn agent session. Classic :meth:`ask` still uses ``generateContent``
+        unless ``google_api_mode="interactions"``.
+        """
+        if not prompt or not prompt.strip():
+            raise ValidationError("Prompt cannot be empty")
+
+        await self._wait_if_needed()
+        client = self._get_interactions_client()
+
+        async def _create() -> AskResult:
+            text, usage, interaction_id = await client.create_interaction(
+                prompt=prompt,
+                model=self._model,
+                system_instruct=system_instruct,
+                previous_interaction_id=previous_interaction_id,
+                tools_schema=tools_schema,
+                execute_tool_cb=execute_tool_cb,
+                max_steps=max_steps,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                include_google_search=google_attach_search_tool,
+            )
+            return AskResult(
+                text=text,
+                usage=self._usage_with_cost(usage),
+                interaction_id=interaction_id,
+            )
+
+        try:
+            return await with_retry(_create, max_retries=self._max_retries)
+        except Exception as e:
+            if isinstance(e, (ValidationError, ConfigurationError, RateLimitError)):
+                raise
+            if is_rate_limit_error(e):
+                raise RateLimitError(
+                    f"Rate limit exceeded after {self._max_retries} retries: {e}"
+                ) from e
+            raise APIError(f"Failed to create interaction: {e}") from e
 
     def _ask_stream(
         self,

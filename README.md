@@ -11,6 +11,8 @@ A model-agnostic Python library providing a unified API for OpenAI, Anthropic Cl
 - **Caching**: Google explicit context cache; Anthropic automatic prompt cache; OpenAI/Inception pass through `cached_tokens` when present
 - **Attachments**: Send PDFs and images as input with one `Attachment` type; each provider translates it to its own native format (Inception Mercury is text-only)
 - **Citations**: Automatic citation injection for Google Gemini responses
+- **Grounded flows**: Two-pass search → JSON (`ask_with_grounded_json`) or markdown (`ask_with_grounded_markdown`) with citation allowlists
+- **Gemini Interactions API**: Optional `ask_interaction()` for server-side multi-turn sessions
 - **Extended thinking**: Single `reasoning_effort` knob (`"low" | "medium" | "high"`, plus `"instant"` on Inception) translates to OpenAI `reasoning.effort`, Anthropic adaptive `output_config.effort` (4.6+) or legacy `thinking.budget_tokens`, Google `thinking_config`, and Inception `reasoning_effort`
 
 ## Installation
@@ -89,8 +91,61 @@ INCEPTION_API_KEY=...
 Smoke-test Inception wiring (live API)::
 
 ```bash
-python scripts/test_inception_wiring.py
+uv run scripts/test_inception_wiring.py
 ```
+
+Live Gemini citation smoke tests (require ``GOOGLE_API_KEY`` in ``.env``)::
+
+```bash
+uv run scripts/test_json_hook_citations.py      # curator JSON hooks
+uv run scripts/test_interactions_api.py         # Interactions API two-turn
+uv run scripts/test_markdown_web_citations.py   # orchestrator web + markdown
+```
+
+Each script logs per-stage latency and token usage. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+### Grounded search + citations (Gemini)
+
+When JSON output and Google Search are combined in one call, Gemini often omits grounding metadata. Use two-pass helpers instead:
+
+```python
+from coffee_with_llm import AskLLM, ask_with_grounded_json, ask_with_grounded_markdown
+
+llm = AskLLM(model="google/gemini-flash-latest")
+
+# Curator-style JSON card hooks
+result = await ask_with_grounded_json(
+    llm,
+    research_prompt="Research two cards about …",
+    json_prompt="Convert your notes into a JSON array of cards …",
+)
+
+# Orchestrator-style markdown reply
+web, markdown, allowed_urls = await ask_with_grounded_markdown(
+    llm,
+    web_query="What is new in …?",
+    markdown_prompt="Write a markdown answer with cited bullets …",
+)
+```
+
+Pass 1 searches the web; pass 2 formats output using only URLs from pass 1.
+
+### Gemini Interactions API
+
+For server-side session state (multi-turn agent flows):
+
+```python
+first = await llm.ask_interaction(
+    prompt="Search and summarize …",
+    system_instruct="Use web search.",
+)
+follow_up = await llm.ask_interaction(
+    prompt="Turn that into JSON …",
+    previous_interaction_id=first.interaction_id,
+)
+```
+
+Requires ``google-genai`` ≥ 2.0.0. Default ``ask()`` still uses ``generateContent``.
 
 ## Usage Examples
 
@@ -346,6 +401,11 @@ Initialize the LLM client.
 - `anthropic_prompt_cache` (bool, optional): Enable Anthropic automatic prompt caching (default: True)
 - `google_inline_citations` (bool, optional): Inject `[cite: url]` markers for Gemini grounding (default: True)
 - `google_attach_search_tool` (bool, optional): When using Gemini with no custom tools, attach the Google Search tool (default: True). Ignored for non-Google models.
+- `google_api_mode` (str, optional): `"generate_content"` (default) or `"interactions"` for Gemini routing.
+
+#### `ask_interaction(...)`
+
+Gemini Interactions API only. Same general parameters as `ask` where applicable, plus `previous_interaction_id` for multi-turn sessions. Returns `AskResult` with `interaction_id` set.
 
 #### `ask(...)`
 

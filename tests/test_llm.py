@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from coffee_with_llm import AskLLM, StreamTextDelta, TokenUsage
+from coffee_with_llm.config import Config
 from coffee_with_llm.exceptions import APIError, ConfigurationError, ValidationError
 
 
@@ -52,13 +53,13 @@ class TestAskLLMInitialization:
 
     def test_init_with_missing_openai_key(self):
         """Test initialization fails when OpenAI API key is missing."""
-        with patch.dict("os.environ", {}, clear=True):
+        with patch("coffee_with_llm.llm.Config.from_env", return_value=Config()):
             with pytest.raises(ConfigurationError):
                 AskLLM(model="gpt-4o-mini")
 
     def test_init_with_missing_google_key(self):
         """Test initialization fails when Google API key is missing."""
-        with patch.dict("os.environ", {}, clear=True):
+        with patch("coffee_with_llm.llm.Config.from_env", return_value=Config()):
             with pytest.raises(ConfigurationError):
                 AskLLM(model="gemini-2.0-flash-exp")
 

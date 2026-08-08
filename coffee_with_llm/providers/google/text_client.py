@@ -30,9 +30,11 @@ from ..tool_utils import (
     update_step_tracking,
 )
 from .utils.citations import (
+    _grounding_metadata,
     async_resolve_urls,
     collect_grounding_urls,
     inject_inline_citations,
+    merge_grounding_responses,
 )
 
 logger = logging.getLogger(__name__)
@@ -463,6 +465,7 @@ class GoogleTextClient:
         temperature: Optional[float] = None,
         system_instruct: str = "",
         attachments: Optional[List[Attachment]] = None,
+        include_google_search: Optional[bool] = None,
     ) -> tuple[str, TokenUsage]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
@@ -472,6 +475,11 @@ class GoogleTextClient:
 
         system_instruct = system_instruct or (instructions or "")
         use_tools = bool(tools_schema and execute_tool_cb)
+        search_enabled = (
+            include_google_search
+            if include_google_search is not None
+            else self._google_attach_search_tool
+        )
         cached_context_name = await self._get_or_create_cached_context(system_instruct, model)
 
         def build_initial_contents() -> List[Any]:
@@ -486,7 +494,7 @@ class GoogleTextClient:
             top_p=top_p,
             response_format=response_format,
             tools_schema=tools_schema if use_tools else None,
-            include_google_search=self._google_attach_search_tool and not use_tools,
+            include_google_search=search_enabled and not use_tools,
             reasoning_effort=reasoning_effort,
         )
 
@@ -499,6 +507,7 @@ class GoogleTextClient:
             request_kwargs["cached_content"] = cached_context_name
 
         last_resp: Optional[Any] = None
+        grounding_responses: List[Any] = []
         last_nonempty_output = ""
         effective_steps = 0
         consecutive_reasoning_only = 0
@@ -516,6 +525,8 @@ class GoogleTextClient:
                 raise APIError(f"Google API request failed: {e}") from e
 
             last_resp = resp
+            if _grounding_metadata(resp):
+                grounding_responses.append(resp)
             text = str(getattr(resp, "text", None) or getattr(resp, "output_text", "") or "")
             if text.strip():
                 last_nonempty_output = text
@@ -600,15 +611,26 @@ class GoogleTextClient:
 
         try:
             if self._google_inline_citations and last_resp:
-                urls = collect_grounding_urls(last_resp)
+                injection_resp = (
+                    merge_grounding_responses(grounding_responses)
+                    if grounding_responses
+                    else last_resp
+                )
+                urls = collect_grounding_urls(injection_resp)
                 if urls:
                     async with httpx.AsyncClient(follow_redirects=True, timeout=2) as http:
                         resolved = await async_resolve_urls(urls, http, max_concurrency=4)
-                    text = inject_inline_citations(
-                        text,
-                        last_resp,
-                        resolve_url=lambda u: resolved.get(u, u),
-                    )
+
+                    def resolve_url(url: str) -> str:
+                        return resolved.get(url, url)
+                else:
+                    def resolve_url(url: str) -> str:
+                        return url
+                text = inject_inline_citations(
+                    text,
+                    injection_resp,
+                    resolve_url=resolve_url,
+                )
         except Exception as e:
             logger.debug(f"Failed to inject citations: {e}")
 
