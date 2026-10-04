@@ -113,24 +113,46 @@ def extract_citations(resp: Any) -> List[Dict[str, Any]]:
     return deduped
 
 
+def _is_vertex_redirect(url: str) -> bool:
+    return "vertexaisearch.cloud.google.com" in (url or "") and "/grounding-api-redirect/" in (
+        url or ""
+    )
+
+
+def _redirect_target(response: httpx.Response, url: str) -> Optional[str]:
+    """Where a redirect points, read off its own reply, or ``None``.
+
+    **Read, not followed.** The redirect answers in about a tenth of a second
+    with the page's address in ``Location``. Following it on to the page made
+    the page's own speed and manners decide whether the citation resolved: a
+    news site that broke HTTP/2 on a HEAD (2026-10-04) failed the request, the
+    redirect stood as the citation, and readers saw
+    ``vertexaisearch.cloud.google.com`` where the page belonged. Nothing here
+    needs the page itself, only its address.
+    """
+    location = response.headers.get("location")
+    if response.is_redirect and location:
+        return str(httpx.URL(url).join(location))
+    return None
+
+
 def resolve_vertex_redirect(url: str, client: httpx.Client, cache: Dict[str, str]) -> str:
-    try:
-        if url in cache:
-            return cache[url]
-        if "vertexaisearch.cloud.google.com" in (url or "") and "/grounding-api-redirect/" in (
-            url or ""
-        ):
-            try:
-                r = client.head(url)
-                final_url = str(r.url)
-            except Exception:
-                r = client.get(url)
-                final_url = str(r.url)
-            cache[url] = final_url
-            return final_url
+    if url in cache:
+        return cache[url]
+    if not _is_vertex_redirect(url):
         return url
-    except Exception:
-        return url
+    final_url = url
+    # HEAD first; GET where a server will not redirect a HEAD.
+    for send in (client.head, client.get):
+        try:
+            target = _redirect_target(send(url, follow_redirects=False), url)
+        except Exception:
+            continue
+        if target:
+            final_url = target
+            break
+    cache[url] = final_url
+    return final_url
 
 
 def resolve_citation_urls(
@@ -237,22 +259,19 @@ async def async_resolve_urls(
     sem = asyncio.Semaphore(max_concurrency)
 
     async def resolve_one(u: str) -> None:
-        try:
-            async with sem:
-                if "vertexaisearch.cloud.google.com" in (
-                    u or ""
-                ) and "/grounding-api-redirect/" in (u or ""):
-                    try:
-                        r = await client.head(u)
-                        final_url = str(r.url)
-                    except Exception:
-                        r = await client.get(u)
-                        final_url = str(r.url)
-                    cache[u] = final_url
-                else:
-                    cache[u] = u
-        except Exception:
-            cache[u] = u
+        cache[u] = u
+        if not _is_vertex_redirect(u):
+            return
+        async with sem:
+            # HEAD first; GET where a server will not redirect a HEAD.
+            for send in (client.head, client.get):
+                try:
+                    target = _redirect_target(await send(u, follow_redirects=False), u)
+                except Exception:
+                    continue
+                if target:
+                    cache[u] = target
+                    return
 
     tasks = [resolve_one(u) for u in urls]
     if tasks:
