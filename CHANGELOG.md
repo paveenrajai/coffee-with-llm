@@ -2,6 +2,12 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.8.3] - 2026-10-05
+
+### Fixed
+
+- **Grounding redirects resolve from their own reply.** Each `vertexaisearch.cloud.google.com/grounding-api-redirect/…` citation is now resolved from the redirect's `Location` header instead of being followed to the cited page. Following it made the page's speed and manners decide: a site that failed the request left the redirect standing as the citation. It also no longer sends a request to every cited site.
+
 ## [0.8.2] - 2026-10-04
 
 ### Added
@@ -43,6 +49,7 @@ All notable changes to `coffee_with_llm` are documented here.
 - `GoogleTextClient` import typo (`GoogleChatClient`) in `AskLLM._generate`.
 - Flaky missing-key unit tests when a repo `.env` is present (patch `Config.from_env` instead of clearing `os.environ`).
 
+[0.8.3]: https://github.com/paveenrajai/coffee-with-llm/compare/0.8.2...0.8.3
 [0.8.2]: https://github.com/paveenrajai/coffee-with-llm/compare/0.8.1...0.8.2
 [0.8.1]: https://github.com/paveenrajai/coffee-with-llm/compare/0.8.0...0.8.1
 [0.8.0]: https://github.com/paveenrajai/coffee-with-llm/compare/v0.7.1...v0.8.0
