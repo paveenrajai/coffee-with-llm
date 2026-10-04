@@ -82,3 +82,33 @@ class TestShouldBreakLoop:
     def test_continue_when_under_limits(self):
         """Continue when under both limits."""
         assert should_break_loop(2, 1, 8) is False
+
+
+class TestNormalizeToolResultKeepsFields:
+    """Fields beside ok/result/error reach the model instead of vanishing."""
+
+    def test_fields_beside_result_are_folded_into_it(self):
+        assert normalize_tool_result({"ok": True, "answer": "3,345 chars", "urls": ["u"]}) == {
+            "ok": True,
+            "result": {"answer": "3,345 chars", "urls": ["u"]},
+            "error": None,
+        }
+
+    def test_results_own_keys_win_a_clash(self):
+        normalized = normalize_tool_result(
+            {"ok": True, "result": {"answer": "kept"}, "answer": "beside it", "n": 1}
+        )
+        assert normalized["result"] == {"answer": "kept", "n": 1}
+
+    def test_a_none_result_takes_the_fields(self):
+        normalized = normalize_tool_result({"ok": True, "result": None, "answer": "a"})
+        assert normalized["result"] == {"answer": "a"}
+
+    def test_a_non_dict_result_keeps_its_shape_and_says_what_was_dropped(self, caplog):
+        normalized = normalize_tool_result({"ok": True, "result": "text", "answer": "a"})
+        assert normalized["result"] == "text"
+        assert "['answer'] dropped" in caplog.text
+
+    def test_a_top_level_error_code_is_found(self):
+        normalized = normalize_tool_result({"ok": False, "error": "no", "error_code": "E1"})
+        assert extract_error_code(normalized) == "E1"
