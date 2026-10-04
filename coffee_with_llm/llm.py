@@ -13,7 +13,7 @@ from .providers.google.api_mode import DEFAULT_GOOGLE_API_MODE, GoogleApiMode
 from .providers.google.interactions_client import GoogleInteractionsClient
 from .providers.google.text_client import GoogleTextClient
 from .providers.registry import get_google_interactions_client, get_provider, split_provider_model
-from .rate_limit import is_rate_limit_error, with_retry
+from .rate_limit import is_rate_limit_error, is_transient_error, with_retry
 from .types import AskResult, StreamResult, StreamUsageSink, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -264,6 +264,7 @@ class AskLLM:
             return await with_retry(
                 _generate,
                 max_retries=self._max_retries,
+                is_retryable=is_transient_error,
             )
         except Exception as e:
             if isinstance(e, (ValidationError, ConfigurationError, RateLimitError)):
@@ -337,7 +338,11 @@ class AskLLM:
             )
 
         try:
-            return await with_retry(_create, max_retries=self._max_retries)
+            return await with_retry(
+                _create,
+                max_retries=self._max_retries,
+                is_retryable=is_transient_error,
+            )
         except Exception as e:
             if isinstance(e, (ValidationError, ConfigurationError, RateLimitError)):
                 raise

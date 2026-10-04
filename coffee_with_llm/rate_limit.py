@@ -63,6 +63,29 @@ def is_rate_limit_error(error: Exception) -> bool:
     )
 
 
+# An empty completion is not an answer the model chose to give. It is a call
+# that produced nothing, and the next one usually produces something.
+_EMPTY_RESPONSE_INDICATORS = ("empty response",)
+
+
+def is_transient_error(error: Exception) -> bool:
+    """Rate limits, and the other failures worth simply asking again.
+
+    Retrying used to mean rate limits and nothing else, so one blank response
+    from a provider was treated as final. A caller driving an agent loop then
+    lost the whole loop to a single empty completion, with no attempt to ask a
+    second time, and fell through to whatever it did when it had no model.
+
+    Deliberately narrow. A refusal, a validation error or a bad request will
+    come back identically however many times it is sent, and retrying those
+    spends the caller's quota to arrive at the same place slower.
+    """
+    if is_rate_limit_error(error):
+        return True
+    text = str(error).lower()
+    return any(indicator in text for indicator in _EMPTY_RESPONSE_INDICATORS)
+
+
 T = TypeVar("T")
 
 
