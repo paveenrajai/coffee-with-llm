@@ -16,6 +16,7 @@ from .types import (
     StreamToolCallStart,
     StreamUsageSink,
     TokenUsage,
+    UrlRetrieval,
 )
 
 __version__ = "0.8.1"
@@ -42,6 +43,7 @@ __all__ = [
     "StreamToolCallStart",
     "StreamUsageSink",
     "TokenUsage",
+    "UrlRetrieval",
     "ConfigurationError",
     "APIError",
     "ValidationError",

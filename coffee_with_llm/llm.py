@@ -14,9 +14,24 @@ from .providers.google.interactions_client import GoogleInteractionsClient
 from .providers.google.text_client import GoogleTextClient
 from .providers.registry import get_google_interactions_client, get_provider, split_provider_model
 from .rate_limit import is_rate_limit_error, is_transient_error, with_retry
-from .types import AskResult, StreamResult, StreamUsageSink, TokenUsage
+from .types import AskResult, StreamResult, StreamUsageSink, TokenUsage, UrlRetrieval
 
 logger = logging.getLogger(__name__)
+
+
+def _retryable(
+    tools_schema: Optional[List[Dict[str, Any]]],
+    execute_tool_cb: Optional[Callable[[str, Dict[str, Any]], Any]],
+) -> Callable[[Exception], bool]:
+    """What a call asks again after: rate limits always, an empty answer only without tools.
+
+    A retry re-runs the whole call. With tools that is the whole loop: every
+    search and every write the tools already made, made again. An empty end to
+    a tool loop is the provider's finalize call to fix, not a retry's.
+    """
+    if tools_schema and execute_tool_cb:
+        return is_rate_limit_error
+    return is_transient_error
 
 
 class AskLLM:
@@ -234,6 +249,9 @@ class AskLLM:
                 self._client, (GoogleTextClient, GoogleInteractionsClient)
             ):
                 generate_kwargs["include_google_search"] = google_attach_search_tool
+            url_retrievals: List[UrlRetrieval] = []
+            if isinstance(self._client, GoogleTextClient):
+                generate_kwargs["url_retrievals"] = url_retrievals
             result = await self._client.generate(
                 prompt=prompt,
                 model=self._model,
@@ -258,13 +276,17 @@ class AskLLM:
             text, usage = (
                 result if isinstance(result, tuple) else (result, TokenUsage(0, 0, 0, None))
             )
-            return AskResult(text=text, usage=self._usage_with_cost(usage))
+            return AskResult(
+                text=text,
+                usage=self._usage_with_cost(usage),
+                url_retrievals=tuple(url_retrievals),
+            )
 
         try:
             return await with_retry(
                 _generate,
                 max_retries=self._max_retries,
-                is_retryable=is_transient_error,
+                is_retryable=_retryable(tools_schema, execute_tool_cb),
             )
         except Exception as e:
             if isinstance(e, (ValidationError, ConfigurationError, RateLimitError)):
@@ -341,7 +363,7 @@ class AskLLM:
             return await with_retry(
                 _create,
                 max_retries=self._max_retries,
-                is_retryable=is_transient_error,
+                is_retryable=_retryable(tools_schema, execute_tool_cb),
             )
         except Exception as e:
             if isinstance(e, (ValidationError, ConfigurationError, RateLimitError)):

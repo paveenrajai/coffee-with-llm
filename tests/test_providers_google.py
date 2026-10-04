@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from coffee_with_llm import Config
-from coffee_with_llm.exceptions import ConfigurationError
+from coffee_with_llm.exceptions import APIError, ConfigurationError
 from coffee_with_llm.providers.google import GoogleTextClient
 from coffee_with_llm.providers.google.text_client import (
     _convert_tools_to_gemini,
@@ -356,3 +356,155 @@ class TestGoogleTextClientGenerate:
             )
             assert text == "Test response"
             assert usage is not None
+
+
+def _usage(prompt_tokens: int, output_tokens: int):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        prompt_token_count=prompt_tokens,
+        candidates_token_count=output_tokens,
+        cached_content_token_count=None,
+    )
+
+
+def _tool_call_response():
+    """A Gemini turn that calls a tool and writes nothing."""
+    from types import SimpleNamespace
+
+    call = SimpleNamespace(function_call=SimpleNamespace(name="search", args={"q": "x"}))
+    content = SimpleNamespace(role="model", parts=[call])
+    return SimpleNamespace(
+        text=None, candidates=[SimpleNamespace(content=content)], usage_metadata=_usage(10, 2)
+    )
+
+
+def _text_response(text: str, *, candidates=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(text=text, candidates=candidates or [], usage_metadata=_usage(30, 8))
+
+
+def _client_answering(*responses):
+    """A GoogleTextClient whose API returns ``responses`` in order, and the requests it got."""
+    requests = []
+    queue = list(responses)
+
+    async def generate_content(**kwargs):
+        requests.append(kwargs)
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    with patch("coffee_with_llm.providers.google.text_client.genai.Client") as mock_genai:
+        mock_genai.return_value.aio.models.generate_content = generate_content
+        client = GoogleTextClient(config=_config(), google_explicit_cache=False)
+    return client, requests
+
+
+_SEARCH_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search.",
+            "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+        },
+    }
+]
+
+
+class TestGoogleToolLoopFinalize:
+    """A tool loop that stops on its cap ends in an answer, not "Empty response"."""
+
+    async def test_a_loop_stopped_by_its_cap_is_asked_for_the_answer(self):
+        client, requests = _client_answering(
+            _tool_call_response(), _text_response("Answer from what the search found.")
+        )
+        text, usage = await client.generate(
+            prompt="Look it up",
+            model="gemini-flash-latest",
+            tools_schema=_SEARCH_TOOL,
+            execute_tool_cb=lambda name, args: {"ok": True, "result": {"hits": 3}},
+            max_effective_tool_steps=1,
+        )
+        assert text == "Answer from what the search found."
+        assert len(requests) == 2
+        final = requests[1]
+        assert final["config"]["tool_config"] == {"function_calling_config": {"mode": "NONE"}}
+        assert "tools" in final["config"]
+        assert final["contents"][-1]["parts"][0]["text"].startswith("Finalize now.")
+        assert "tool_config" not in requests[0]["config"]
+        assert usage.input_tokens == 40
+        assert usage.output_tokens == 10
+
+    async def test_without_tools_an_empty_answer_is_not_finalized(self):
+        client, requests = _client_answering(_text_response(""))
+        with pytest.raises(APIError, match="Empty response"):
+            await client.generate(prompt="Hello", model="gemini-flash-latest")
+        assert len(requests) == 1
+
+    async def test_a_failed_finalize_still_reports_the_empty_response(self):
+        client, requests = _client_answering(_tool_call_response(), RuntimeError("boom"))
+        with pytest.raises(APIError, match="Empty response"):
+            await client.generate(
+                prompt="Look it up",
+                model="gemini-flash-latest",
+                tools_schema=_SEARCH_TOOL,
+                execute_tool_cb=lambda name, args: {"ok": True, "result": {}},
+                max_effective_tool_steps=1,
+            )
+        assert len(requests) == 2
+
+
+class TestGoogleUrlRetrievals:
+    """Which links URL context opened, so a caller can tell read from refused."""
+
+    async def test_each_link_is_reported_once_with_its_last_status(self):
+        from google.genai import types as gtypes
+
+        from coffee_with_llm import UrlRetrieval
+
+        status = gtypes.UrlRetrievalStatus
+        candidate = gtypes.Candidate(
+            url_context_metadata=gtypes.UrlContextMetadata(
+                url_metadata=[
+                    gtypes.UrlMetadata(
+                        retrieved_url="https://repo.example/",
+                        url_retrieval_status=status.URL_RETRIEVAL_STATUS_ERROR,
+                    ),
+                    gtypes.UrlMetadata(
+                        retrieved_url="https://news.example/",
+                        url_retrieval_status=status.URL_RETRIEVAL_STATUS_ERROR,
+                    ),
+                    gtypes.UrlMetadata(
+                        retrieved_url="https://repo.example/",
+                        url_retrieval_status=status.URL_RETRIEVAL_STATUS_SUCCESS,
+                    ),
+                ]
+            )
+        )
+        client, _ = _client_answering(_text_response("Summary.", candidates=[candidate]))
+        retrievals: list = []
+        await client.generate(
+            prompt="Compare https://news.example/ and https://repo.example/",
+            model="gemini-flash-latest",
+            url_retrievals=retrievals,
+        )
+        assert retrievals == [
+            UrlRetrieval(
+                url="https://repo.example/", ok=True, status="URL_RETRIEVAL_STATUS_SUCCESS"
+            ),
+            UrlRetrieval(
+                url="https://news.example/", ok=False, status="URL_RETRIEVAL_STATUS_ERROR"
+            ),
+        ]
+
+    async def test_no_link_reports_nothing(self):
+        client, _ = _client_answering(_text_response("Hi."))
+        retrievals: list = []
+        await client.generate(
+            prompt="Hello", model="gemini-flash-latest", url_retrievals=retrievals
+        )
+        assert retrievals == []

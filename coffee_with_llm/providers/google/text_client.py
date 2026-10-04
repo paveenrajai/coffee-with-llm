@@ -21,6 +21,7 @@ from ...types import (
     StreamToolCallEnd,
     StreamUsageSink,
     TokenUsage,
+    UrlRetrieval,
 )
 from .._reasoning import thinking_budget_tokens
 from ..tool_utils import (
@@ -44,6 +45,26 @@ logger = logging.getLogger(__name__)
 #: does not hold (new, or small) is read instead of reported missing. URL
 #: context does nothing when the prompt has no link.
 SEARCH_TOOLS: List[Dict[str, Any]] = [{"google_search": {}}, {"url_context": {}}]
+
+#: Sent after a tool loop that stopped with nothing written, with tool calls
+#: switched off, so the loop ends in an answer from what the tools returned.
+#: The same words the Anthropic client uses.
+FINALIZE_PROMPT = "Finalize now. Return the final answer. No further tool calls."
+
+
+def _url_retrievals(resp: Any) -> List[UrlRetrieval]:
+    """The links URL context tried to open for this response, and how each went."""
+    found: List[UrlRetrieval] = []
+    for candidate in getattr(resp, "candidates", None) or []:
+        meta = getattr(candidate, "url_context_metadata", None)
+        for item in getattr(meta, "url_metadata", None) or []:
+            url = getattr(item, "retrieved_url", None)
+            if not isinstance(url, str) or not url:
+                continue
+            status = getattr(item, "url_retrieval_status", None)
+            name = str(getattr(status, "name", None) or status or "")
+            found.append(UrlRetrieval(url=url, ok=name.endswith("SUCCESS"), status=name))
+    return found
 
 
 def _attachment_part(attachment: Attachment) -> Dict[str, Any]:
@@ -292,6 +313,26 @@ class GoogleTextClient:
             logger.error(f"Tool execution failed for {name}: {e}")
             return {"ok": False, "result": {}, "error": str(e)}
 
+    async def _finalize_empty_response(self, request_kwargs: Dict[str, Any]) -> Any:
+        """Ask once more with tool calls off, after a tool loop wrote nothing.
+
+        A loop stopped by its step cap stops right after a tool call: the
+        results are in ``contents`` and no text was written. The Anthropic,
+        OpenAI and Inception clients already ask once more; Gemini raised
+        "Empty response" instead, and a caller lost every call the loop made.
+
+        The tools stay declared and ``mode: NONE`` forbids calling them, so the
+        function calls and results already in ``contents`` still read as valid.
+        """
+        config = dict(request_kwargs["config"])
+        config["tool_config"] = {"function_calling_config": {"mode": "NONE"}}
+        contents = list(request_kwargs["contents"]) + [
+            {"role": "user", "parts": [{"text": FINALIZE_PROMPT}]}
+        ]
+        return await self._client.aio.models.generate_content(
+            **{**request_kwargs, "config": config, "contents": contents}
+        )
+
     def _get_system_prompt_hash(self, system_instruct: str) -> str:
         """Generate hash for system prompt to use as cache key."""
         return hashlib.sha256(system_instruct.encode()).hexdigest()
@@ -472,7 +513,14 @@ class GoogleTextClient:
         system_instruct: str = "",
         attachments: Optional[List[Attachment]] = None,
         include_google_search: Optional[bool] = None,
+        url_retrievals: Optional[List[UrlRetrieval]] = None,
     ) -> tuple[str, TokenUsage]:
+        """Generate a reply, running the tool loop when tools are given.
+
+        ``url_retrievals``, when passed, is filled with each link URL context
+        tried to open, once per link, so a caller can tell a page that was read
+        from one that was refused and answered from search instead.
+        """
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
 
@@ -520,6 +568,18 @@ class GoogleTextClient:
         total_input = 0
         total_output = 0
         total_cached: Optional[int] = None
+        retrieved: List[UrlRetrieval] = []
+
+        def count(resp: Any) -> None:
+            nonlocal total_input, total_output, total_cached
+            um = getattr(resp, "usage_metadata", None)
+            if um:
+                total_input += getattr(um, "prompt_token_count", 0) or 0
+                total_output += getattr(um, "candidates_token_count", 0) or 0
+                cc = getattr(um, "cached_content_token_count", None)
+                if cc is not None:
+                    total_cached = (total_cached or 0) + cc
+            retrieved.extend(_url_retrievals(resp))
 
         for step in range(max_steps):
             try:
@@ -537,13 +597,7 @@ class GoogleTextClient:
             if text.strip():
                 last_nonempty_output = text
 
-            um = getattr(resp, "usage_metadata", None)
-            if um:
-                total_input += getattr(um, "prompt_token_count", 0) or 0
-                total_output += getattr(um, "candidates_token_count", 0) or 0
-                cc = getattr(um, "cached_content_token_count", None)
-                if cc is not None:
-                    total_cached = (total_cached or 0) + cc
+            count(resp)
 
             if not use_tools:
                 break
@@ -612,8 +666,24 @@ class GoogleTextClient:
         if not text.strip():
             text = last_nonempty_output or ""
 
+        if not text.strip() and use_tools:
+            try:
+                final_resp = await self._finalize_empty_response(request_kwargs)
+            except Exception as e:
+                if is_rate_limit_error(e):
+                    raise
+                logger.warning(f"Failed to finalize response: {e}")
+            else:
+                count(final_resp)
+                last_resp = final_resp
+                text = str(getattr(final_resp, "text", None) or "")
+
         if not text.strip():
             raise APIError("Empty response received from Google API")
+
+        if url_retrievals is not None:
+            by_url = {r.url: r for r in retrieved}
+            url_retrievals.extend(by_url.values())
 
         try:
             if self._google_inline_citations and last_resp:

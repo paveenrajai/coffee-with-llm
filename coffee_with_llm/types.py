@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Dict, Mapping, Optional, Union, cast
+from typing import Any, AsyncIterator, Callable, Dict, Mapping, Optional, Tuple, Union, cast
 
 from .rate_limit import retry_stream
 
@@ -180,6 +180,18 @@ class StreamUsageSink:
         )
 
 
+@dataclass(frozen=True)
+class UrlRetrieval:
+    """One link Gemini's URL context tried to open, and whether it could."""
+
+    url: str
+    #: True only when the page was read. A refused fetch (a site that blocks
+    #: it, a paywall, an unsafe page) is answered from search, if at all.
+    ok: bool
+    #: The provider's own status name, e.g. ``URL_RETRIEVAL_STATUS_ERROR``.
+    status: str
+
+
 @dataclass
 class AskResult:
     """Result of an LLM ask with token usage."""
@@ -188,6 +200,9 @@ class AskResult:
     usage: TokenUsage
     #: Set when the call used Gemini Interactions API (for multi-turn continuation).
     interaction_id: Optional[str] = None
+    #: Each link in the prompt that Gemini's URL context tried to open, once
+    #: per link. Empty when there was no link, and for other providers.
+    url_retrievals: Tuple[UrlRetrieval, ...] = ()
 
     def __str__(self) -> str:
         return self.text
