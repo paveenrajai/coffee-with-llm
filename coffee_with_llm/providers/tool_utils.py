@@ -11,9 +11,18 @@ logger = logging.getLogger(__name__)
 # Prevents infinite loops when model keeps "thinking" without calling tools.
 MAX_CONSECUTIVE_REASONING_ONLY = 3
 
+_TOOL_RESULT_KEYS = ("ok", "result", "error")
+
 
 def normalize_tool_result(result: Any) -> Dict[str, Any]:
-    """Normalize tool execution result to standard format."""
+    """Normalize tool execution result to standard format.
+
+    A dict's fields beside ``ok``, ``result`` and ``error`` are folded into
+    ``result``, which is what the model is shown. They used to be dropped
+    without a word: a tool that returned ``{"ok": True, "answer": ...}`` handed
+    the model an empty result, and the model reported, truthfully, that the
+    tool had found nothing. ``result``'s own keys win a clash.
+    """
     try:
         if hasattr(result, "ok"):
             return {
@@ -22,9 +31,20 @@ def normalize_tool_result(result: Any) -> Dict[str, Any]:
                 "error": getattr(result, "error", None),
             }
         if isinstance(result, dict):
+            payload = result.get("result", {})
+            extra = {k: v for k, v in result.items() if k not in _TOOL_RESULT_KEYS}
+            if extra:
+                if payload is None or isinstance(payload, dict):
+                    payload = {**extra, **(payload or {})}
+                else:
+                    logger.warning(
+                        "Tool result fields %s dropped: `result` is a %s, not a dict",
+                        sorted(extra),
+                        type(payload).__name__,
+                    )
             return {
                 "ok": bool(result.get("ok", False)),
-                "result": result.get("result", {}),
+                "result": payload,
                 "error": result.get("error", None),
             }
     except Exception as e:

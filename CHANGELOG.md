@@ -2,6 +2,18 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.8.2] - 2026-10-04
+
+### Added
+
+- **`AskResult.url_retrievals`**: for Gemini, each link URL context tried to open, as `UrlRetrieval(url, ok, status)`. A site that refuses the fetch is answered from search; this is how a caller can tell.
+
+### Fixed
+
+- **A Gemini tool loop that hits its step cap ends in an answer.** It stopped right after a tool call and raised "Empty response", losing every call it made. It now asks once more with tool calls off, as the Anthropic, OpenAI and Inception clients already did.
+- **An empty response is asked again**, on calls without tools. A tool loop is not retried: that would run every tool again.
+- **Tool result fields beside `result` reach the model.** They were dropped without a word, so a tool returning `{"ok": True, "answer": ...}` handed the model an empty result. They are now folded into `result`.
+
 ## [0.8.1] - 2026-10-04
 
 ### Changed
@@ -31,5 +43,6 @@ All notable changes to `coffee_with_llm` are documented here.
 - `GoogleTextClient` import typo (`GoogleChatClient`) in `AskLLM._generate`.
 - Flaky missing-key unit tests when a repo `.env` is present (patch `Config.from_env` instead of clearing `os.environ`).
 
+[0.8.2]: https://github.com/paveenrajai/coffee-with-llm/compare/0.8.1...0.8.2
 [0.8.1]: https://github.com/paveenrajai/coffee-with-llm/compare/0.8.0...0.8.1
 [0.8.0]: https://github.com/paveenrajai/coffee-with-llm/compare/v0.7.1...v0.8.0

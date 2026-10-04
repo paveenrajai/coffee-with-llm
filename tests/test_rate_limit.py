@@ -130,3 +130,38 @@ class TestRetryStream:
 class TestConstants:
     def test_backoff_base(self):
         assert RATE_LIMIT_BACKOFF_BASE == 2
+
+
+async def test_an_empty_response_is_asked_again():
+    """One blank completion used to end whatever the caller was doing.
+
+    It was not a rate limit, so nothing retried it, and a caller driving an
+    agent loop lost the loop to a single empty answer from the provider.
+    """
+    from coffee_with_llm.exceptions import APIError
+    from coffee_with_llm.rate_limit import is_transient_error, with_retry
+
+    assert is_transient_error(APIError("Empty response received from Google API"))
+
+    attempts = []
+
+    async def blank_then_answer():
+        attempts.append(1)
+        if len(attempts) < 2:
+            raise APIError("Empty response received from Google API")
+        return "answered"
+
+    assert await with_retry(
+        blank_then_answer, max_retries=3, is_retryable=is_transient_error
+    ) == "answered"
+    assert len(attempts) == 2
+
+
+def test_a_refusal_is_not_asked_again():
+    """Narrow on purpose: a bad request returns the same answer every time,
+    and retrying it spends the caller's quota to arrive there slower."""
+    from coffee_with_llm.exceptions import APIError
+    from coffee_with_llm.rate_limit import is_transient_error
+
+    assert not is_transient_error(APIError("400 invalid request: bad schema"))
+    assert not is_transient_error(ValueError("content blocked by safety filter"))

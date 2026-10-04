@@ -228,6 +228,10 @@ response = await llm.ask(
 )
 ```
 
+The model is shown `result`. Fields a tool returns beside `ok`, `result` and `error` are folded into `result` (its own keys win a clash), so `{"ok": True, "temp": 18}` reaches the model as `result: {"temp": 18}`.
+
+When a tool loop ends without writing anything, usually because it hit `max_steps` or `max_effective_tool_steps` right after a tool call, the client asks once more with tool calls switched off, so the loop ends in an answer from what the tools returned. An empty answer from a call **without** tools is retried like a rate limit; one from a tool loop is not, since a retry would run every tool again.
+
 ### Extended Thinking (provider-agnostic)
 
 `reasoning_effort` is a single string — `"low"`, `"medium"`, or `"high"` (Inception
@@ -432,7 +436,7 @@ Generate a response from the LLM.
 - `stream` (bool, optional): When True, return `StreamResult` (default: False)
 - `attachments` (list[Attachment], optional): PDFs or images for the model to read alongside `prompt`. Provider-agnostic — see [Attachments](#attachments-pdfs-and-images).
 
-**Returns:** `AskResult` – Object with `.text` (str) and `.usage` (TokenUsage). When `stream=True`, returns `StreamResult` – async iterable of stream events (see Streaming above); `.usage` after completion or `aclose()`.
+**Returns:** `AskResult` – Object with `.text` (str), `.usage` (TokenUsage), and `.url_retrievals`: for Gemini, each link in the prompt that URL context tried to open, as `UrlRetrieval(url, ok, status)`. `ok` is false when the site refused the fetch and the answer came from search instead; empty when there was no link, and for other providers. When `stream=True`, returns `StreamResult` – async iterable of stream events (see Streaming above); `.usage` after completion or `aclose()`.
 
 **Raises:**
 - `ValidationError`: If prompt is empty or invalid parameters provided

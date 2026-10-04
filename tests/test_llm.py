@@ -314,3 +314,60 @@ class TestAskLLMStreaming:
         assert len(chunks) == 1
         assert isinstance(chunks[0], StreamTextDelta)
         assert chunks[0].text == "ok"
+
+
+class TestAskRetryNarrowedForTools:
+    """An empty answer is asked again only when no tool loop ran to produce it."""
+
+    async def test_an_empty_answer_without_tools_is_asked_again(self, mock_google_api_key):
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            llm = AskLLM(model="gemini-2.0-flash-exp", min_delay_between_calls=0)
+        llm._client.generate = AsyncMock(
+            side_effect=[APIError("Empty response received from Google API"), "answered"]
+        )
+        with patch("coffee_with_llm.rate_limit.asyncio.sleep", AsyncMock()):
+            result = await llm.ask(prompt="Hello")
+        assert result.text == "answered"
+        assert llm._client.generate.await_count == 2
+
+    async def test_an_empty_end_to_a_tool_loop_is_not_run_again(self, mock_google_api_key):
+        """Asking again would re-run every tool the loop called."""
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            llm = AskLLM(model="gemini-2.0-flash-exp", min_delay_between_calls=0)
+        llm._client.generate = AsyncMock(
+            side_effect=APIError("Empty response received from Google API")
+        )
+        with patch("coffee_with_llm.rate_limit.asyncio.sleep", AsyncMock()):
+            with pytest.raises(APIError):
+                await llm.ask(
+                    prompt="Look it up",
+                    tools_schema=[{"type": "function", "function": {"name": "search"}}],
+                    execute_tool_cb=lambda name, args: {"ok": True, "result": {}},
+                )
+        assert llm._client.generate.await_count == 1
+
+
+class TestAskUrlRetrievals:
+    async def test_gemini_reports_the_links_it_opened(self, mock_google_api_key):
+        from coffee_with_llm import UrlRetrieval
+
+        read = UrlRetrieval(
+            url="https://a.example/", ok=True, status="URL_RETRIEVAL_STATUS_SUCCESS"
+        )
+
+        async def generate(**kwargs):
+            kwargs["url_retrievals"].append(read)
+            return "Summary.", TokenUsage(1, 1, 2, None)
+
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            llm = AskLLM(model="gemini-2.0-flash-exp", min_delay_between_calls=0)
+        llm._client.generate = generate
+        result = await llm.ask(prompt="Summarise https://a.example/")
+        assert result.url_retrievals == (read,)
+
+    async def test_other_providers_report_none(self, mock_openai_api_key):
+        with patch("openai.AsyncOpenAI"):
+            llm = AskLLM(model="gpt-4o-mini", min_delay_between_calls=0)
+        llm._client.generate = AsyncMock(return_value="Hi.")
+        result = await llm.ask(prompt="Hello https://a.example/")
+        assert result.url_retrievals == ()
