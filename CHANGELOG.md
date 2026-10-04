@@ -2,6 +2,12 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.8.1] - 2026-10-04
+
+### Changed
+
+- **Gemini URL context**: with search attached, `ask()` (generate_content) now attaches the URL context tool beside Google Search, so a link in the prompt is opened and read. A page Google's index does not hold was reported missing before.
+
 ## [0.8.0] - 2026-08-08
 
 ### Added
@@ -25,4 +31,5 @@ All notable changes to `coffee_with_llm` are documented here.
 - `GoogleTextClient` import typo (`GoogleChatClient`) in `AskLLM._generate`.
 - Flaky missing-key unit tests when a repo `.env` is present (patch `Config.from_env` instead of clearing `os.environ`).
 
+[0.8.1]: https://github.com/paveenrajai/coffee-with-llm/compare/0.8.0...0.8.1
 [0.8.0]: https://github.com/paveenrajai/coffee-with-llm/compare/v0.7.1...v0.8.0

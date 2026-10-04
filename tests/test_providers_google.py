@@ -58,7 +58,14 @@ class TestGoogleTextClientBuildConfigDict:
             client = GoogleTextClient(config=_config())
             config = client._build_config_dict()
             assert "tools" in config
-            assert config["tools"] == [{"google_search": {}}]
+            assert config["tools"] == [{"google_search": {}}, {"url_context": {}}]
+
+    def test_build_config_tools_are_copies(self):
+        """A caller editing the built config must not change the next request's tools."""
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            client = GoogleTextClient(config=_config())
+            client._build_config_dict()["tools"][0]["edited"] = True
+            assert client._build_config_dict()["tools"][0] == {"google_search": {}}
 
     def test_build_config_with_max_tokens(self):
         """Test building config with max_tokens."""
