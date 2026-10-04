@@ -70,7 +70,9 @@ class AskLLM:
             google_explicit_cache: Enable Google context caching for Gemini (default: True)
             google_inline_citations: Inject [cite: url] for Gemini grounding (default: True)
             google_attach_search_tool: When using Gemini with no custom tools, attach the
-                Google Search tool (default: True). Ignored for non-Google models.
+                Google Search tool (default: True). In ``generate_content`` mode URL
+                context is attached with it, so a link in the prompt is read rather
+                than searched for. Ignored for non-Google models.
             google_api_mode: For Gemini only, ``"generate_content"`` (default) uses the
                 classic Models API; ``"interactions"`` routes :meth:`ask` to the
                 Interactions API. :meth:`ask_interaction` always uses Interactions.

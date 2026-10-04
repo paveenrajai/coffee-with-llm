@@ -39,6 +39,12 @@ from .utils.citations import (
 
 logger = logging.getLogger(__name__)
 
+#: Attached when search is on. Google Search finds pages in Google's index;
+#: URL context opens a link in the prompt and reads it, so a page the index
+#: does not hold (new, or small) is read instead of reported missing. URL
+#: context does nothing when the prompt has no link.
+SEARCH_TOOLS: List[Dict[str, Any]] = [{"google_search": {}}, {"url_context": {}}]
+
 
 def _attachment_part(attachment: Attachment) -> Dict[str, Any]:
     """Translate one attachment into a Gemini inline_data part.
@@ -240,7 +246,7 @@ class GoogleTextClient:
             if gemini_decls:
                 config_dict["tools"] = [types.Tool(function_declarations=gemini_decls)]
             elif include_google_search and not tools_schema:
-                config_dict["tools"] = [{"google_search": {}}]
+                config_dict["tools"] = [dict(tool) for tool in SEARCH_TOOLS]
 
         if max_tokens is not None:
             config_dict["max_output_tokens"] = max_tokens

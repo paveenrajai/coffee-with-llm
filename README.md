@@ -130,6 +130,8 @@ web, markdown, allowed_urls = await ask_with_grounded_markdown(
 
 Pass 1 searches the web; pass 2 formats output using only URLs from pass 1.
 
+With search attached, `ask()` also attaches Gemini's URL context tool, so a link in the prompt is opened and read rather than looked up in Google's index. A new or small page the index does not hold is read instead of reported missing. A site that refuses the fetch falls back to search.
+
 ### Gemini Interactions API
 
 For server-side session state (multi-turn agent flows):
@@ -400,7 +402,7 @@ Initialize the LLM client.
 - `google_explicit_cache` (bool, optional): Enable Google context caching (default: True)
 - `anthropic_prompt_cache` (bool, optional): Enable Anthropic automatic prompt caching (default: True)
 - `google_inline_citations` (bool, optional): Inject `[cite: url]` markers for Gemini grounding (default: True)
-- `google_attach_search_tool` (bool, optional): When using Gemini with no custom tools, attach the Google Search tool (default: True). Ignored for non-Google models.
+- `google_attach_search_tool` (bool, optional): When using Gemini with no custom tools, attach the Google Search tool (default: True). In `generate_content` mode URL context is attached with it, so a link in the prompt is read. Ignored for non-Google models.
 - `google_api_mode` (str, optional): `"generate_content"` (default) or `"interactions"` for Gemini routing.
 
 #### `ask_interaction(...)`
