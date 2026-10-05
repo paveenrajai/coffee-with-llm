@@ -2,6 +2,12 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.8.4] - 2026-10-05
+
+### Fixed
+
+- **Inline `[cite: …]` markers land where their sentence ends.** Gemini gives a grounded segment's end in bytes, and it was used as a character position, so every non-ASCII character before it (a curly apostrophe is three bytes) pushed the marker further on: "Vin [cite: …]cent Bernat". Facts split at those markers credited the wrong page. Both plain answers and JSON `hook` fields now read it as a byte offset.
+
 ## [0.8.3] - 2026-10-05
 
 ### Fixed

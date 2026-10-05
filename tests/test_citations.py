@@ -180,6 +180,49 @@ class TestInjectInlineCitations:
         assert result == "Hello [cite: https://example.com] world"
 
 
+    def test_prose_markers_land_where_the_segment_ends_past_non_ascii(self):
+        """Live, 2026-10-05: "Vin [cite: …]cent Bernat". Gemini counts a
+        segment's end in bytes, and a curly apostrophe is three of them."""
+        first = "Phil Tippett’s studio closed, and its “90 discs” reached the Internet Archive."
+        second = " Vincent Bernat built a tunnel with ssh -R."
+        text = first + second
+        resp = _mock_response(
+            chunks=[_mock_chunk("https://filmstories.co.uk/a"), _mock_chunk("https://bernat.ch/b")],
+            supports=[
+                _mock_support(end_index=len(first.encode()), chunk_indices=[0]),
+                _mock_support(end_index=len(text.encode()), chunk_indices=[1]),
+            ],
+        )
+        result = inject_inline_citations(text, resp, lambda u: u)
+        assert result == (
+            f"{first} [cite: https://filmstories.co.uk/a]{second} [cite: https://bernat.ch/b]"
+        )
+
+    def test_json_hook_support_past_non_ascii_cites_its_own_hook(self):
+        first = "Tippett’s “archive” of ’90s stop-motion — café tests, über-rare."
+        second = "Bernat’s tunnel."
+        text = (
+            f'[{{"title":"A","hook":"{first}","questions":[]}},'
+            f'{{"title":"B","hook":"{second}","questions":[]}}]'
+        )
+
+        def end_in_bytes(hook: str) -> int:
+            return len(text[: text.index(hook) + len(hook)].encode())
+
+        # Listed against the hooks' order, so handing chunks out in turn to
+        # hooks no support reached cannot pass for the supports being read.
+        resp = _mock_response(
+            chunks=[_mock_chunk("https://b.example/2"), _mock_chunk("https://a.example/1")],
+            supports=[
+                _mock_support(end_index=end_in_bytes(first), chunk_indices=[1]),
+                _mock_support(end_index=end_in_bytes(second), chunk_indices=[0]),
+            ],
+        )
+        result = inject_inline_citations(text, resp, lambda u: u)
+        assert f'"hook":"{first} [cite: https://a.example/1]"' in result
+        assert f'"hook":"{second} [cite: https://b.example/2]"' in result
+
+
 class TestGroundingHelpers:
     def test_describe_grounding_empty(self):
         resp = _mock_response(chunks=[], supports=[])
