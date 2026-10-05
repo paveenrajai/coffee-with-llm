@@ -470,6 +470,21 @@ def _visible_text(text: str) -> str:
     return CITATION_MARKER_RE.sub("", text)
 
 
+def _position(encoded: bytes, byte_offset: int) -> int:
+    """A segment's ``end_index`` as a position in the text ``encoded`` holds.
+
+    **Gemini counts it in bytes** of the UTF-8 text, and a string is indexed by
+    character. They agree only while every character so far is ASCII: a curly
+    apostrophe is three bytes and one character, so each one before a segment
+    put its marker two characters further on. On 2026-10-05 a summary of five
+    stories came back with "Vin [cite: …]cent Bernat", the marker for the story
+    before it landing inside the next one's first word, and the facts split at
+    those markers credited the wrong pages. An offset inside a character counts
+    up to that character.
+    """
+    return len(encoded[: max(0, byte_offset)].decode("utf-8", errors="ignore"))
+
+
 def _json_hook_regions(text: str) -> List[Tuple[int, int, int]]:
     """Return ``(value_start, quote_pos, assign_through)`` for each JSON hook field."""
     regions: List[Tuple[int, int, int]] = []
@@ -522,6 +537,7 @@ def _urls_for_hook_span(
     resolve_url: Callable[[str], str],
     value_start: int,
     quote_pos: int,
+    encoded: bytes,
 ) -> List[str]:
     urls: List[str] = []
     for support in supports:
@@ -530,7 +546,7 @@ def _urls_for_hook_span(
             end_idx = getattr(seg, "end_index", None)
             if not isinstance(end_idx, int):
                 continue
-            if not (value_start <= end_idx <= quote_pos):
+            if not (value_start <= _position(encoded, end_idx) <= quote_pos):
                 continue
             idxs = (
                 getattr(support, "grounding_chunk_indices", None)
@@ -572,6 +588,7 @@ def _inject_json_hook_citations(
     if not regions:
         return text
 
+    encoded = text.encode("utf-8")
     buckets: List[List[str]] = [[] for _ in regions]
     for match in CITATION_MARKER_RE.finditer(text):
         region_index = _region_index_for_position(match.start(), regions)
@@ -582,7 +599,7 @@ def _inject_json_hook_citations(
     for index, (value_start, quote_pos, _assign_through) in enumerate(regions):
         hook_text = text[value_start:quote_pos]
         support_urls = _urls_for_hook_span(
-            supports, idx_to_url, resolve_url, value_start, quote_pos
+            supports, idx_to_url, resolve_url, value_start, quote_pos, encoded
         )
         for url in support_urls:
             if url not in buckets[index]:
@@ -616,6 +633,7 @@ def _inject_prose_citations(
     idx_to_url: Dict[int, str],
     resolve_url: Callable[[str], str],
 ) -> str:
+    encoded = text.encode("utf-8")
     insertions: List[Dict[str, Any]] = []
     for support in supports:
         try:
@@ -640,8 +658,7 @@ def _inject_prose_citations(
                     seen_local.add(resolved)
                     urls.append(resolved)
             if urls:
-                pos = max(0, min(len(text), end_idx))
-                insertions.append({"pos": pos, "urls": urls})
+                insertions.append({"pos": _position(encoded, end_idx), "urls": urls})
         except Exception:
             continue
 
@@ -674,6 +691,8 @@ def inject_inline_citations(text: str, resp: Any, resolve_url) -> str:
     are round-robin assigned to hooks still missing markers.
 
     For plain prose, falls back to offset-based insertion at each support end_index.
+
+    Every ``end_index`` is a byte offset and is read as one (:func:`_position`).
     """
     try:
         if not text:
