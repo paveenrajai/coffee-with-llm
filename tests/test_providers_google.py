@@ -306,7 +306,10 @@ class TestGoogleTextClientGenerate:
             mock_response = MagicMock()
             mock_response.text = "Test response"
             mock_response.usage_metadata = MagicMock(
-                prompt_token_count=10, candidates_token_count=5, thoughts_token_count=None
+                prompt_token_count=10,
+                candidates_token_count=5,
+                thoughts_token_count=None,
+                cached_content_token_count=None,
             )
 
             async def mock_generate(*args, **kwargs):

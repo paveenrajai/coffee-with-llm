@@ -18,6 +18,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
+from .._cached import uncached_input
 from .._served import served_model
 from .._stop import stop_from
 from ..tool_utils import (
@@ -106,6 +107,30 @@ def _reasoning_tokens(usage: Any) -> Optional[int]:
     count = getattr(details, "reasoning_tokens", None) if details is not None else None
     return int(count) if count else None
 
+
+def _cached_tokens(usage: Any) -> Optional[int]:
+    """Cache reads, a part of ``input_tokens`` on OpenAI."""
+    details = getattr(usage, "input_tokens_details", None)
+    count = getattr(details, "cached_tokens", None) if details is not None else None
+    return int(count) if count is not None else None
+
+
+def _token_usage(usage: Any, served: Optional[str]) -> TokenUsage:
+    """A Responses ``usage`` as :class:`TokenUsage`, with cache reads apart from input."""
+    inp = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0)
+    out = int(getattr(usage, "output_tokens", 0))
+    cached = _cached_tokens(usage)
+    uncached = uncached_input(int(inp), cached)
+    return TokenUsage(
+        input_tokens=uncached,
+        output_tokens=out,
+        total_tokens=uncached + out,
+        cached_tokens=cached,
+        reasoning_tokens=_reasoning_tokens(usage),
+        served_model=served,
+    )
+
+
 class OpenAIResponsesClient:
     def __init__(self, config: Config, request_timeout: Optional[float] = None) -> None:
         self._api_key = config.require_openai_key()
@@ -175,18 +200,7 @@ class OpenAIResponsesClient:
                     return u
             usage = getattr(event, "usage", None)
             if usage:
-                inp = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0)
-                out = getattr(usage, "output_tokens", 0)
-                total = getattr(usage, "total_tokens", None) or (inp + out)
-                cached = getattr(usage, "cached_tokens", None)
-                return TokenUsage(
-                    input_tokens=int(inp),
-                    output_tokens=int(out),
-                    total_tokens=int(total),
-                    cached_tokens=int(cached) if cached is not None else None,
-                    reasoning_tokens=_reasoning_tokens(usage),
-                    served_model=served_model(getattr(event, "model", None)),
-                )
+                return _token_usage(usage, served_model(getattr(event, "model", None)))
         except Exception:
             pass
         return None
@@ -198,18 +212,7 @@ class OpenAIResponsesClient:
             usage = getattr(resp, "usage", None)
             if not usage:
                 return None
-            inp = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0)
-            out = getattr(usage, "output_tokens", 0)
-            total = getattr(usage, "total_tokens", None) or (inp + out)
-            cached = getattr(usage, "cached_tokens", None)
-            return TokenUsage(
-                input_tokens=int(inp),
-                output_tokens=int(out),
-                total_tokens=int(total),
-                cached_tokens=int(cached) if cached is not None else None,
-                reasoning_tokens=_reasoning_tokens(usage),
-                served_model=served_model(getattr(resp, "model", None)),
-            )
+            return _token_usage(usage, served_model(getattr(resp, "model", None)))
         except Exception:
             return None
 

@@ -26,6 +26,7 @@ from ...types import (
     TokenUsage,
     UrlRetrieval,
 )
+from .._cached import uncached_input
 from .._reasoning import normalize_effort, thinking_budget_tokens
 from .._served import served_model
 from .._stop import stop_from
@@ -176,20 +177,19 @@ def _thinking_config(model: str, reasoning_effort: Optional[str]) -> Optional[An
 
 
 def _gemini_tokens(um: Any) -> tuple[int, int, int, Optional[int]]:
-    """Input, output, thinking and cached tokens from one usage_metadata.
+    """Uncached input, output, thinking and cached tokens from one usage_metadata.
 
-    ``candidates_token_count`` leaves the thinking out, which Gemini bills as
-    output, so output here is the two together.
+    ``prompt_token_count`` includes the cached content, which is reported
+    apart, so input here leaves it out. ``candidates_token_count`` leaves the
+    thinking out, which Gemini bills as output, so output here is the two
+    together.
     """
     thoughts = int(getattr(um, "thoughts_token_count", 0) or 0)
     output = int(getattr(um, "candidates_token_count", 0) or 0) + thoughts
-    cached = getattr(um, "cached_content_token_count", None)
-    return (
-        int(getattr(um, "prompt_token_count", 0) or 0),
-        output,
-        thoughts,
-        int(cached) if cached is not None else None,
-    )
+    raw_cached = getattr(um, "cached_content_token_count", None)
+    cached = int(raw_cached) if raw_cached is not None else None
+    prompt = int(getattr(um, "prompt_token_count", 0) or 0)
+    return (uncached_input(prompt, cached), output, thoughts, cached)
 
 
 def _google_stream_chunk_to_usage_sink(

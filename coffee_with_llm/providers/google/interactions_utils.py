@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...types import Stop, StopReason, TokenUsage
+from .._cached import uncached_input
 from .._served import served_model
 from .._stop import stop_from
 
@@ -91,17 +92,19 @@ def interaction_usage(interaction: Any) -> TokenUsage:
         return TokenUsage(
             0, 0, 0, None, served_model=served_model(getattr(interaction, "model", None))
         )
-    input_tokens = int(getattr(usage, "total_input_tokens", 0) or 0)
+    raw_cached = getattr(usage, "total_cached_tokens", None)
+    cached = int(raw_cached) if raw_cached is not None else None
+    # The prompt count includes its cached part, which is reported apart.
+    prompt = int(getattr(usage, "total_input_tokens", 0) or 0)
+    input_tokens = uncached_input(prompt, cached)
     # Thinking is counted apart from the responses, and billed as output.
     thoughts = int(getattr(usage, "total_thought_tokens", 0) or 0)
     output_tokens = int(getattr(usage, "total_output_tokens", 0) or 0) + thoughts
-    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or input_tokens + output_tokens
-    cached = getattr(usage, "total_cached_tokens", None)
     return TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        total_tokens=total_tokens,
-        cached_tokens=int(cached) if cached is not None else None,
+        total_tokens=input_tokens + output_tokens,
+        cached_tokens=cached,
         reasoning_tokens=thoughts or None,
         served_model=served_model(getattr(interaction, "model", None)),
     )

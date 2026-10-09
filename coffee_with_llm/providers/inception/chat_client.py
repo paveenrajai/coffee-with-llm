@@ -28,6 +28,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
+from .._cached import uncached_input
 from .._served import served_model
 from .._stop import stop_from
 from ..tool_utils import (
@@ -162,17 +163,17 @@ def _usage_from_chat(usage: Any, served: Optional[str] = None) -> Optional[Token
     if usage is None:
         return None
     try:
-        inp = int(getattr(usage, "prompt_tokens", 0) or 0)
-        out = int(getattr(usage, "completion_tokens", 0) or 0)
-        total = int(getattr(usage, "total_tokens", 0) or (inp + out))
         cached = _extract_cached_tokens(usage)
+        # prompt_tokens includes the cached part, which is reported apart.
+        inp = uncached_input(int(getattr(usage, "prompt_tokens", 0) or 0), cached)
+        out = int(getattr(usage, "completion_tokens", 0) or 0)
         # Counted within completion_tokens, where the endpoint reports them.
         details = getattr(usage, "completion_tokens_details", None)
         reasoning = getattr(details, "reasoning_tokens", None) if details is not None else None
         return TokenUsage(
             input_tokens=inp,
             output_tokens=out,
-            total_tokens=total,
+            total_tokens=inp + out,
             cached_tokens=cached,
             reasoning_tokens=int(reasoning) if reasoning else None,
             served_model=served,
@@ -395,7 +396,7 @@ class InceptionChatClient:
         client: Any,
         params: Dict[str, Any],
         base_messages: List[Dict[str, Any]],
-    ) -> tuple[str, int, int, Optional[Stop]]:
+    ) -> tuple[str, Optional[TokenUsage], Optional[Stop]]:
         finalize_params = dict(params)
         finalize_params.pop("tools", None)
         finalize_params.pop("tool_choice", None)
@@ -411,10 +412,8 @@ class InceptionChatClient:
         if choice is not None:
             msg = getattr(choice, "message", None)
             text = (getattr(msg, "content", None) or "") if msg is not None else ""
-        usage = getattr(finalize_resp, "usage", None)
-        inp = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
-        out = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
-        return text, inp, out, _chat_stop(finalize_resp)
+        usage = _usage_from_chat(getattr(finalize_resp, "usage", None))
+        return text, usage, _chat_stop(finalize_resp)
 
     async def generate(
         self,
@@ -613,11 +612,13 @@ class InceptionChatClient:
         stop = _chat_stop(last_resp)
         if not final_text.strip():
             try:
-                final_text, inp_delta, out_delta, stop = await self._finalize_empty_response(
+                final_text, final_usage, stop = await self._finalize_empty_response(
                     client, params, base_messages
                 )
-                total_input += inp_delta
-                total_output += out_delta
+                if final_usage:
+                    total_input += final_usage.input_tokens
+                    total_output += final_usage.output_tokens
+                    total_cached += final_usage.cached_tokens or 0
             except Exception as e:
                 if is_rate_limit_error(e):
                     raise

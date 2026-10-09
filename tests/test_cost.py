@@ -20,7 +20,7 @@ class TestEstimateCost:
 
     def test_cached_tokens_use_discounted_rate(self):
         usage_uncached = TokenUsage(1000, 100, 1100, None)
-        usage_cached = TokenUsage(1000, 100, 1100, 500)
+        usage_cached = TokenUsage(500, 100, 600, 500)
         cost_uncached = estimate_cost(usage_uncached, "gpt-4o")
         cost_cached = estimate_cost(usage_cached, "gpt-4o")
         assert cost_cached is not None
@@ -29,7 +29,7 @@ class TestEstimateCost:
 
     def test_anthropic_cached_tokens_use_discounted_rate(self):
         usage_uncached = TokenUsage(10_000, 100, 10_100, None)
-        usage_cached = TokenUsage(10_000, 100, 10_100, 5000)
+        usage_cached = TokenUsage(5000, 100, 5100, 5000)
         cost_uncached = estimate_cost(usage_uncached, "claude-opus-4-8")
         cost_cached = estimate_cost(usage_cached, "claude-opus-4-8")
         assert cost_uncached is not None
@@ -77,7 +77,7 @@ class TestEstimateCost:
         assert cost == round(0.25 + 0.75, 6)
 
     def test_mercury_cached_pricing(self):
-        usage = TokenUsage(1_000_000, 0, 1_000_000, 500_000)
+        usage = TokenUsage(500_000, 0, 500_000, 500_000)
         cost = estimate_cost(usage, "mercury-2")
         # 500k uncached @ 0.25 + 500k cached @ 0.025
         expected = (500_000 / 1_000_000) * 0.25 + (500_000 / 1_000_000) * 0.025

@@ -368,7 +368,7 @@ A stream never yields the `Stop`; it is read from `result.stop`.
 
 ### Understanding token usage
 
-`TokenUsage` exposes provider-native buckets plus computed totals:
+`TokenUsage` exposes the same disjoint buckets for every provider, plus computed totals:
 
 | Field | Meaning |
 |-------|---------|
