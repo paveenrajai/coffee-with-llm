@@ -28,6 +28,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
+from .._served import served_model
 from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
@@ -156,7 +157,8 @@ def _chat_stop(resp: Any) -> Optional[Stop]:
     return stop_from(getattr(choice, "finish_reason", None), _INCEPTION_STOPS)
 
 
-def _usage_from_chat(usage: Any) -> Optional[TokenUsage]:
+def _usage_from_chat(usage: Any, served: Optional[str] = None) -> Optional[TokenUsage]:
+    """Usage from a chat completion's ``usage``; ``served`` is its ``model``."""
     if usage is None:
         return None
     try:
@@ -173,6 +175,7 @@ def _usage_from_chat(usage: Any) -> Optional[TokenUsage]:
             total_tokens=total,
             cached_tokens=cached,
             reasoning_tokens=int(reasoning) if reasoning else None,
+            served_model=served,
         )
     except Exception:
         return None
@@ -474,6 +477,7 @@ class InceptionChatClient:
         total_output = 0
         total_reasoning = 0
         total_cached = 0
+        served: Optional[str] = None
 
         for step in range(max_steps):
             try:
@@ -490,11 +494,14 @@ class InceptionChatClient:
                 logger.error(f"Inception API call failed at step {step + 1}: {e}")
                 raise APIError(f"Inception API request failed: {e}") from e
 
-            step_usage = _usage_from_chat(getattr(resp, "usage", None))
+            step_usage = _usage_from_chat(
+                getattr(resp, "usage", None), served_model(getattr(resp, "model", None))
+            )
             if step_usage:
                 total_input += step_usage.input_tokens
                 total_output += step_usage.output_tokens
                 total_reasoning += step_usage.reasoning_tokens or 0
+                served = step_usage.served_model or served
                 if step_usage.cached_tokens:
                     total_cached += step_usage.cached_tokens
 
@@ -627,6 +634,7 @@ class InceptionChatClient:
             total_tokens=total_input + total_output,
             cached_tokens=total_cached if total_cached else None,
             reasoning_tokens=total_reasoning or None,
+            served_model=served,
         )
         return final_text, usage, stop
 
@@ -678,15 +686,17 @@ class InceptionChatClient:
         consecutive_reasoning_only = 0
         pending_resp: Optional[Any] = None
         stop: Optional[Stop] = None
+        served: Optional[str] = None
 
-        def apply_usage(usage: Any) -> None:
-            nonlocal total_input, total_output, total_reasoning, total_cached
-            step_usage = _usage_from_chat(usage)
+        def apply_usage(usage: Any, model: Optional[str]) -> None:
+            nonlocal total_input, total_output, total_reasoning, total_cached, served
+            step_usage = _usage_from_chat(usage, model)
             if step_usage is None:
                 return
             total_input += step_usage.input_tokens
             total_output += step_usage.output_tokens
             total_reasoning += step_usage.reasoning_tokens or 0
+            served = step_usage.served_model or served
             if step_usage.cached_tokens:
                 total_cached += step_usage.cached_tokens
             if usage_sink is not None:
@@ -697,6 +707,7 @@ class InceptionChatClient:
                         total_input + total_output,
                         total_cached if total_cached else None,
                         reasoning_tokens=total_reasoning or None,
+                        served_model=served,
                     )
                 )
 
@@ -721,7 +732,9 @@ class InceptionChatClient:
                 if pending_resp is not None:
                     resp = pending_resp
                     pending_resp = None
-                    apply_usage(getattr(resp, "usage", None))
+                    apply_usage(
+                        getattr(resp, "usage", None), served_model(getattr(resp, "model", None))
+                    )
                     choice = (getattr(resp, "choices", None) or [None])[0]
                     message = getattr(choice, "message", None) if choice is not None else None
                     finish_reason = (
@@ -740,9 +753,11 @@ class InceptionChatClient:
                     started_tools: set[int] = set()
                     finish_reason = "stop"
                     stream_usage: Any = None
+                    stream_model: Optional[str] = None
 
                     stream = await client.chat.completions.create(**stream_params)
                     async for chunk in stream:
+                        stream_model = served_model(getattr(chunk, "model", None)) or stream_model
                         if getattr(chunk, "usage", None) is not None:
                             stream_usage = chunk.usage
                             if usage_sink is not None:
@@ -789,7 +804,7 @@ class InceptionChatClient:
                                         args_frag,
                                     )
 
-                    apply_usage(stream_usage)
+                    apply_usage(stream_usage, stream_model)
 
                     # Reconstruct message-like object for the tool loop.
                     class _Fn:
@@ -888,6 +903,7 @@ class InceptionChatClient:
                 total_tokens=total_input + total_output,
                 cached_tokens=total_cached if total_cached else None,
                 reasoning_tokens=total_reasoning or None,
+                served_model=served,
             )
         except Exception as e:
             if is_rate_limit_error(e):

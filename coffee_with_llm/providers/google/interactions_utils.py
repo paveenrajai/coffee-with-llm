@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...types import Stop, StopReason, TokenUsage
+from .._served import served_model
 from .._stop import stop_from
 
 
@@ -87,7 +88,9 @@ def interaction_usage(interaction: Any) -> TokenUsage:
     """Map Interaction usage to coffee-with-llm :class:`TokenUsage`."""
     usage = getattr(interaction, "usage", None)
     if usage is None:
-        return TokenUsage(0, 0, 0, None)
+        return TokenUsage(
+            0, 0, 0, None, served_model=served_model(getattr(interaction, "model", None))
+        )
     input_tokens = int(getattr(usage, "total_input_tokens", 0) or 0)
     # Thinking is counted apart from the responses, and billed as output.
     thoughts = int(getattr(usage, "total_thought_tokens", 0) or 0)
@@ -100,6 +103,7 @@ def interaction_usage(interaction: Any) -> TokenUsage:
         total_tokens=total_tokens,
         cached_tokens=int(cached) if cached is not None else None,
         reasoning_tokens=thoughts or None,
+        served_model=served_model(getattr(interaction, "model", None)),
     )
 
 

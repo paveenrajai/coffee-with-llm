@@ -432,8 +432,22 @@ class AskLLM:
         )
 
     def _usage_with_cost(self, usage: TokenUsage) -> TokenUsage:
-        """Add cost_usd to usage."""
-        return dataclasses.replace(usage, cost_usd=estimate_cost(usage, self._model))
+        """Add cost_usd, priced at the model that served the call.
+
+        That is the model the provider named in its reply, so an alias is
+        priced at whatever it points to today; the model asked for only when
+        the provider did not say. A model with no price is left unpriced and
+        said so, never priced as something else.
+        """
+        priced_as = usage.served_model or self._model
+        cost = estimate_cost(usage, priced_as)
+        if cost is None:
+            logger.warning(
+                "No price for model %r (asked for %r); cost_usd left empty",
+                priced_as,
+                self._model,
+            )
+        return dataclasses.replace(usage, cost_usd=cost)
 
     async def _wait_if_needed(self) -> None:
         """Wait if needed to maintain minimum delay between calls."""

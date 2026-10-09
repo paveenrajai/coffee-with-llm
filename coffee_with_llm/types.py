@@ -41,6 +41,11 @@ class TokenUsage:
     #: Thinking tokens, counted within ``output_tokens``. ``None`` when the
     #: provider does not report them.
     reasoning_tokens: Optional[int] = None
+    #: The model that served the call, as the provider named it in its reply:
+    #: for an alias such as ``gemini-flash-lite-latest``, whatever it points to
+    #: today. ``cost_usd`` is priced at this model. ``None`` when the provider
+    #: did not say.
+    served_model: Optional[str] = None
 
     @property
     def prompt_tokens(self) -> int:
@@ -68,6 +73,7 @@ class TokenUsage:
             "billable_tokens": self.billable_tokens,
             "cost_usd": self.cost_usd,
             "reasoning_tokens": self.reasoning_tokens,
+            "served_model": self.served_model,
         }
 
     @classmethod
@@ -91,6 +97,7 @@ class TokenUsage:
         cost_usd = float(cost_raw) if cost_raw is not None else None
         reasoning_raw = raw.get("reasoning_tokens")
         reasoning_tokens = int(reasoning_raw) if reasoning_raw is not None else None
+        served_raw = raw.get("served_model")
         return cls(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -99,6 +106,7 @@ class TokenUsage:
             cache_creation_tokens=cache_creation_tokens,
             cost_usd=cost_usd,
             reasoning_tokens=reasoning_tokens,
+            served_model=str(served_raw) if served_raw else None,
         )
 
 
@@ -197,6 +205,7 @@ class StreamUsageSink:
     _cached: Optional[int] = None
     _cache_creation: Optional[int] = None
     _reasoning: Optional[int] = None
+    _served_model: Optional[str] = None
 
     def merge(
         self,
@@ -222,6 +231,7 @@ class StreamUsageSink:
         self._cached = usage.cached_tokens
         self._cache_creation = usage.cache_creation_tokens
         self._reasoning = usage.reasoning_tokens
+        self._served_model = usage.served_model or self._served_model
 
     def snapshot(self) -> TokenUsage:
         return TokenUsage(
@@ -231,6 +241,7 @@ class StreamUsageSink:
             cached_tokens=self._cached,
             cache_creation_tokens=self._cache_creation,
             reasoning_tokens=self._reasoning,
+            served_model=self._served_model,
         )
 
 
