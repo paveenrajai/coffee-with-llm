@@ -12,14 +12,13 @@ from .rate_limit import retry_stream
 class TokenUsage:
     """Token usage for a generation session (aggregated across multi-step/tool loops).
 
-    Field semantics vary by provider:
-
-    - **OpenAI:** ``cached_tokens`` is often a subset of ``input_tokens``.
-    - **Anthropic (prompt cache):** ``input_tokens``, ``cached_tokens`` (cache reads),
-      and ``cache_creation_tokens`` (cache writes) are **disjoint** buckets. A large
-      system prompt on the first turn can yield tiny ``input_tokens`` with most
-      prompt tokens in ``cache_creation_tokens``.
-    - **Google:** ``cached_tokens`` reflects context-cache reads when reported.
+    The prompt is split into **disjoint** buckets, the same for every provider:
+    ``input_tokens`` is the uncached input, billed at the full input rate;
+    ``cached_tokens`` is cache reads; ``cache_creation_tokens`` is cache writes,
+    which only Anthropic reports. Google, OpenAI and Inception count cache reads
+    inside their own input count, and they are taken out of ``input_tokens``
+    here. On Anthropic, a large system prompt on the first turn can yield tiny
+    ``input_tokens`` with most prompt tokens in ``cache_creation_tokens``.
 
     ``reasoning_tokens`` are the model's thinking, and always a part of
     ``output_tokens``, which is what every provider bills them as. Google,

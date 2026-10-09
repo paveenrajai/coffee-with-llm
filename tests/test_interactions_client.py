@@ -93,11 +93,13 @@ class TestInteractionUtils:
         interaction = MagicMock()
         interaction.usage = usage
         mapped = interaction_usage(interaction)
-        assert mapped.input_tokens == 10
+        # The cached part of the prompt is reported apart from the rest.
+        assert mapped.input_tokens == 8
+        assert mapped.prompt_tokens == 10
         # Thinking is billed as output, and counted apart by the API.
         assert mapped.output_tokens == 8
         assert mapped.reasoning_tokens == 3
-        assert mapped.total_tokens == 15
+        assert mapped.total_tokens == 16
         assert mapped.cached_tokens == 2
 
 

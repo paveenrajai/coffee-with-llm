@@ -2,6 +2,19 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.10.1] - 2026-10-09
+
+### Changed
+
+- **`input_tokens` leaves out cache reads for Google, OpenAI and Inception, as documented.** Each of them counts cache reads inside its own input count. `input_tokens` is now that count less `cached_tokens`, never below 0, so the buckets are disjoint for every provider, as they already were for Anthropic. The Interactions API is counted the same way.
+- **`total_tokens` is `input_tokens + output_tokens` for every provider**, now with the uncached input. The Interactions API, OpenAI and Inception passed the provider's own total through, which counts the cache (and, for the Interactions API, other internal tokens); it is now the same sum as everywhere else.
+
+### Fixed
+
+- **Cached tokens are counted once in `prompt_tokens` and `billable_tokens`.** Google, the Interactions API and Inception counted a cache read in `input_tokens` and again in `cached_tokens`, and OpenAI would have once its reads were read. On 2026-10-09 a Gemini board with a 90,116-token prompt, 36,841 of them cached, reported `prompt_tokens=126957`. The call Inception makes to finalize an empty answer counted its cache reads as uncached input.
+- **OpenAI cache reads are read.** They were looked for at `usage.cached_tokens`, which the Responses API does not send; they are at `usage.input_tokens_details.cached_tokens`. Every cache read was billed at the full input price.
+- **Anthropic is no longer undercharged when its cache read is smaller than its uncached input.** `estimate_cost` guessed from which was larger whether `cached_tokens` was inside `input_tokens`, and took Anthropic's read, a bucket of its own, out of its input. It now bills each bucket once, at its own rate. Gemini's cost is unchanged: the board above still costs $0.091424.
+
 ## [0.10.0] - 2026-10-09
 
 ### Added

@@ -127,7 +127,7 @@ class TestOpenAIResponsesClientGenerate:
             mock_response.usage = MagicMock()
             mock_response.usage.input_tokens = 10
             mock_response.usage.output_tokens = 1
-            mock_response.usage.cached_tokens = 0
+            mock_response.usage.input_tokens_details.cached_tokens = 0
             mock_response.usage.prompt_tokens = 10
             mock_response.required_action = None
 

@@ -91,8 +91,10 @@ def estimate_cost(
     Returns:
         Estimated cost in USD, or None if model pricing unknown.
 
-    Anthropic prompt-cache writes (``cache_creation_tokens``) are billed at 125% of
-    the model's input rate when present.
+    The prompt buckets are disjoint for every provider, so each is billed once
+    at its own rate: ``input_tokens`` at the input rate, ``cached_tokens`` at the
+    cached rate, and Anthropic prompt-cache writes (``cache_creation_tokens``) at
+    125% of the input rate.
     """
     pricing = _get_pricing(model, on)
     if not pricing:
@@ -101,15 +103,9 @@ def estimate_cost(
     inp_per_1m, out_per_1m, cached_per_1m = pricing
 
     cached = usage.cached_tokens or 0
-    # OpenAI: cached_tokens is often a subset of input_tokens. Anthropic: input_tokens
-    # and cache_read_input_tokens are disjoint buckets — do not subtract when disjoint.
-    if cached > usage.input_tokens:
-        uncached_input = usage.input_tokens
-    else:
-        uncached_input = max(0, usage.input_tokens - cached)
 
     cost = 0.0
-    cost += (uncached_input / 1_000_000) * inp_per_1m
+    cost += (usage.input_tokens / 1_000_000) * inp_per_1m
     cost += (usage.output_tokens / 1_000_000) * out_per_1m
     if cached > 0 and cached_per_1m is not None:
         cost += (cached / 1_000_000) * cached_per_1m
