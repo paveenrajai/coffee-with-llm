@@ -138,7 +138,9 @@ class TestOpenAIResponsesClientGenerate:
             mock_openai.return_value = mock_client_instance
 
             client = OpenAIResponsesClient(config=_config())
-            text, usage = await client.generate(prompt="What is Python?", model="gpt-4o-mini")
+            text, usage, _stop = await client.generate(
+                prompt="What is Python?", model="gpt-4o-mini"
+            )
             assert text == "Test response"
             assert usage is not None
             assert usage.input_tokens == 10
@@ -162,7 +164,7 @@ class TestOpenAIResponsesClientGenerate:
             mock_openai.return_value = mock_client_instance
 
             client = OpenAIResponsesClient(config=_config())
-            text, usage = await client.generate(
+            text, usage, _stop = await client.generate(
                 prompt="What is Python?",
                 model="gpt-4o-mini",
                 instructions="You are a helpful assistant.",
@@ -189,7 +191,7 @@ class TestOpenAIResponsesClientGenerate:
             mock_openai.return_value = mock_client_instance
 
             client = OpenAIResponsesClient(config=_config())
-            text, usage = await client.generate(
+            text, usage, _stop = await client.generate(
                 prompt="What is Python?", model="gpt-4o-mini", max_tokens=100
             )
             assert text == "Test response"

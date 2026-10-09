@@ -21,6 +21,11 @@ class TokenUsage:
       prompt tokens in ``cache_creation_tokens``.
     - **Google:** ``cached_tokens`` reflects context-cache reads when reported.
 
+    ``reasoning_tokens`` are the model's thinking, and always a part of
+    ``output_tokens``, which is what every provider bills them as. Google,
+    OpenAI and Inception report them; Anthropic counts thinking in
+    ``output_tokens`` without saying how much, so it is ``None`` there.
+
     ``total_tokens`` is ``input_tokens + output_tokens`` (legacy). It does **not**
     include cache read/write tokens. Use :meth:`prompt_tokens` or :meth:`billable_tokens`
     for observability and quota dashboards.
@@ -33,6 +38,9 @@ class TokenUsage:
     # Anthropic cache_creation_input_tokens (prompt cache writes); optional elsewhere.
     cache_creation_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
+    #: Thinking tokens, counted within ``output_tokens``. ``None`` when the
+    #: provider does not report them.
+    reasoning_tokens: Optional[int] = None
 
     @property
     def prompt_tokens(self) -> int:
@@ -59,6 +67,7 @@ class TokenUsage:
             "prompt_tokens": self.prompt_tokens,
             "billable_tokens": self.billable_tokens,
             "cost_usd": self.cost_usd,
+            "reasoning_tokens": self.reasoning_tokens,
         }
 
     @classmethod
@@ -80,6 +89,8 @@ class TokenUsage:
         )
         cost_raw = raw.get("cost_usd")
         cost_usd = float(cost_raw) if cost_raw is not None else None
+        reasoning_raw = raw.get("reasoning_tokens")
+        reasoning_tokens = int(reasoning_raw) if reasoning_raw is not None else None
         return cls(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -87,7 +98,44 @@ class TokenUsage:
             cached_tokens=cached_tokens,
             cache_creation_tokens=cache_creation_tokens,
             cost_usd=cost_usd,
+            reasoning_tokens=reasoning_tokens,
         )
+
+
+class StopReason:
+    """Why a model stopped writing, in the same words for every provider.
+
+    Closed on purpose: each provider's own reasons fold into these few, and
+    its own word for it is kept in :attr:`Stop.raw`.
+    """
+
+    #: It finished what it was writing.
+    END = "end"
+    #: It hit ``max_tokens`` and was cut off. Where a provider counts thinking
+    #: against that limit (Gemini, OpenAI), a long think can use it up first.
+    MAX_TOKENS = "max_tokens"
+    #: The provider's safety or recitation filter stopped it, or it refused.
+    CONTENT_FILTER = "content_filter"
+    #: It ended asking for a tool, which a caller sees when a tool loop runs
+    #: out of steps.
+    TOOL_USE = "tool_use"
+    #: Anything else. :attr:`Stop.raw` says what.
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class Stop:
+    """Why the last step of a call stopped, and the provider's word for it."""
+
+    #: One of :class:`StopReason`.
+    reason: str
+    #: As the provider gave it, e.g. ``MAX_TOKENS``, ``end_turn``, ``length``.
+    raw: str
+
+    @property
+    def truncated(self) -> bool:
+        """The answer was cut off at ``max_tokens``, not finished."""
+        return self.reason == StopReason.MAX_TOKENS
 
 
 @dataclass(frozen=True)
@@ -137,7 +185,7 @@ StreamEvent = Union[
     StreamStepBoundary,
 ]
 
-StreamChunk = Union[StreamEvent, TokenUsage]
+StreamChunk = Union[StreamEvent, Stop, TokenUsage]
 
 
 @dataclass
@@ -148,6 +196,7 @@ class StreamUsageSink:
     _output: int = 0
     _cached: Optional[int] = None
     _cache_creation: Optional[int] = None
+    _reasoning: Optional[int] = None
 
     def merge(
         self,
@@ -156,6 +205,7 @@ class StreamUsageSink:
         cached: Optional[int] = None,
         *,
         cache_creation: Optional[int] = None,
+        reasoning: Optional[int] = None,
     ) -> None:
         self._input += int(inp)
         self._output += int(out)
@@ -163,12 +213,15 @@ class StreamUsageSink:
             self._cached = (self._cached or 0) + int(cached)
         if cache_creation is not None:
             self._cache_creation = (self._cache_creation or 0) + int(cache_creation)
+        if reasoning is not None:
+            self._reasoning = (self._reasoning or 0) + int(reasoning)
 
     def replace_with(self, usage: TokenUsage) -> None:
         self._input = usage.input_tokens
         self._output = usage.output_tokens
         self._cached = usage.cached_tokens
         self._cache_creation = usage.cache_creation_tokens
+        self._reasoning = usage.reasoning_tokens
 
     def snapshot(self) -> TokenUsage:
         return TokenUsage(
@@ -177,6 +230,7 @@ class StreamUsageSink:
             total_tokens=self._input + self._output,
             cached_tokens=self._cached,
             cache_creation_tokens=self._cache_creation,
+            reasoning_tokens=self._reasoning,
         )
 
 
@@ -203,6 +257,9 @@ class AskResult:
     #: Each link in the prompt that Gemini's URL context tried to open, once
     #: per link. Empty when there was no link, and for other providers.
     url_retrievals: Tuple[UrlRetrieval, ...] = ()
+    #: Why the last step stopped. ``None`` only from a provider that does
+    #: not say.
+    stop: Optional[Stop] = None
 
     def __str__(self) -> str:
         return self.text
@@ -222,6 +279,9 @@ class StreamResult:
 
     ``usage`` is set when iteration completes or after :meth:`aclose` (e.g. early break),
     using final totals when available, otherwise :class:`StreamUsageSink` snapshot.
+    ``stop`` says why the last step stopped, once iteration completes: a
+    stream cut off at ``max_tokens`` ends the same way as a finished one, and
+    this is how a caller tells them apart.
 
     Must be iterated via ``async for`` (``__aiter__`` before ``__anext__``).
     """
@@ -238,6 +298,7 @@ class StreamResult:
         self._max_retries = max_retries
         self._usage_sink = usage_sink
         self._usage: Optional[TokenUsage] = None
+        self._stop: Optional[Stop] = None
         self._iter: Optional[AsyncIterator[object]] = None
         self._closed: bool = False
 
@@ -257,8 +318,13 @@ class StreamResult:
             raise RuntimeError(
                 "StreamResult must be iterated via async for; __aiter__ was not called"
             )
-        item = await self._iter.__anext__()
-        item = _normalize_stream_item(item)
+        item = _normalize_stream_item(await self._iter.__anext__())
+        # A provider says why it stopped just before its usage. It is kept
+        # here rather than passed on, so a consumer that knows only the
+        # events it asked for never meets one it does not.
+        while isinstance(item, Stop):
+            self._stop = item
+            item = _normalize_stream_item(await self._iter.__anext__())
         if isinstance(item, TokenUsage):
             self._apply_usage(item)
             raise StopAsyncIteration
@@ -298,3 +364,9 @@ class StreamResult:
     @property
     def usage(self) -> Optional[TokenUsage]:
         return self._usage
+
+    @property
+    def stop(self) -> Optional[Stop]:
+        """Why the last step stopped. ``None`` before the stream ends, after an
+        early close, and from a provider that does not say."""
+        return self._stop

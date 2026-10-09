@@ -37,12 +37,16 @@ def _merge_usage(first: TokenUsage | None, second: TokenUsage | None) -> TokenUs
     cached = None
     if a.cached_tokens is not None or b.cached_tokens is not None:
         cached = (a.cached_tokens or 0) + (b.cached_tokens or 0)
+    reasoning = None
+    if a.reasoning_tokens is not None or b.reasoning_tokens is not None:
+        reasoning = (a.reasoning_tokens or 0) + (b.reasoning_tokens or 0)
     return TokenUsage(
         input_tokens=a.input_tokens + b.input_tokens,
         output_tokens=a.output_tokens + b.output_tokens,
         total_tokens=a.total_tokens + b.total_tokens,
         cached_tokens=cached,
         cost_usd=(a.cost_usd or 0.0) + (b.cost_usd or 0.0) or None,
+        reasoning_tokens=reasoning,
     )
 
 

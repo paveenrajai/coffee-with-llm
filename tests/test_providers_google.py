@@ -281,7 +281,7 @@ class TestGoogleTextClientGenerate:
             mock_response = MagicMock()
             mock_response.text = "Test response"
             mock_response.usage_metadata = MagicMock(
-                prompt_token_count=10, candidates_token_count=5
+                prompt_token_count=10, candidates_token_count=5, thoughts_token_count=None
             )
 
             async def mock_generate(*args, **kwargs):
@@ -293,7 +293,7 @@ class TestGoogleTextClientGenerate:
             mock_genai.return_value = mock_client_instance
 
             client = GoogleTextClient(config=_config())
-            text, usage = await client.generate(
+            text, usage, _stop = await client.generate(
                 prompt="What is Python?", model="gemini-2.0-flash-exp"
             )
             assert text == "Test response"
@@ -310,7 +310,9 @@ class TestGoogleTextClientGenerate:
             mock_models = MagicMock()
             mock_response = MagicMock()
             mock_response.text = "Test response"
-            mock_response.usage_metadata = MagicMock(prompt_token_count=8, candidates_token_count=4)
+            mock_response.usage_metadata = MagicMock(
+                prompt_token_count=8, candidates_token_count=4, thoughts_token_count=None
+            )
 
             async def mock_generate(*args, **kwargs):
                 return mock_response
@@ -321,7 +323,7 @@ class TestGoogleTextClientGenerate:
             mock_genai.return_value = mock_client_instance
 
             client = GoogleTextClient(config=_config())
-            text, usage = await client.generate(
+            text, usage, _stop = await client.generate(
                 prompt="What is Python?",
                 model="gemini-2.0-flash-exp",
                 system_instruct="You are a helpful assistant.",
@@ -339,7 +341,7 @@ class TestGoogleTextClientGenerate:
             mock_response = MagicMock()
             mock_response.text = "Test response"
             mock_response.usage_metadata = MagicMock(
-                prompt_token_count=12, candidates_token_count=6
+                prompt_token_count=12, candidates_token_count=6, thoughts_token_count=None
             )
 
             async def mock_generate(*args, **kwargs):
@@ -351,7 +353,7 @@ class TestGoogleTextClientGenerate:
             mock_genai.return_value = mock_client_instance
 
             client = GoogleTextClient(config=_config())
-            text, usage = await client.generate(
+            text, usage, _stop = await client.generate(
                 prompt="What is Python?", model="gemini-2.0-flash-exp", max_tokens=100
             )
             assert text == "Test response"
@@ -422,7 +424,7 @@ class TestGoogleToolLoopFinalize:
         client, requests = _client_answering(
             _tool_call_response(), _text_response("Answer from what the search found.")
         )
-        text, usage = await client.generate(
+        text, usage, _stop = await client.generate(
             prompt="Look it up",
             model="gemini-flash-latest",
             tools_schema=_SEARCH_TOOL,

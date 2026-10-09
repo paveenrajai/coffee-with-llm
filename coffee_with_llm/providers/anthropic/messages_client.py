@@ -17,6 +17,8 @@ from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
 from ...types import (
+    Stop,
+    StopReason,
     StreamStepBoundary,
     StreamTextDelta,
     StreamToolArgumentsDelta,
@@ -26,6 +28,7 @@ from ...types import (
     TokenUsage,
 )
 from .._reasoning import normalize_effort, thinking_budget_tokens
+from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -240,6 +243,23 @@ def _log_anthropic_cache_usage(usage: Any) -> None:
         )
 
 
+#: Anthropic's stop reasons, in the words every provider shares. A reason not
+#: here (``pause_turn``) is kept as OTHER.
+_ANTHROPIC_STOPS = {
+    "end_turn": StopReason.END,
+    "stop_sequence": StopReason.END,
+    "max_tokens": StopReason.MAX_TOKENS,
+    "model_context_window_exceeded": StopReason.MAX_TOKENS,
+    "tool_use": StopReason.TOOL_USE,
+    "refusal": StopReason.CONTENT_FILTER,
+}
+
+
+def _anthropic_stop(resp: Any) -> Optional[Stop]:
+    """Why Anthropic stopped writing ``resp``."""
+    return stop_from(getattr(resp, "stop_reason", None), _ANTHROPIC_STOPS)
+
+
 def _token_usage_from_totals(
     total_input: int,
     total_output: int,
@@ -447,8 +467,11 @@ class AnthropicMessagesClient:
         client: Any,
         params: Dict[str, Any],
         base_messages: List[Dict[str, Any]],
-    ) -> tuple[str, int, int]:
-        """Finalize when response is empty; returns (final_text, input_delta, output_delta)."""
+    ) -> tuple[str, int, int, Optional[Stop]]:
+        """Finalize when response is empty.
+
+        Returns (final_text, input_delta, output_delta, why it stopped).
+        """
         finalize_params = dict(params)
         finalize_params.pop("tools", None)
         finalize_params["messages"] = base_messages + [
@@ -463,7 +486,7 @@ class AnthropicMessagesClient:
         _log_anthropic_cache_usage(fu)
         inp_delta = getattr(fu, "input_tokens", 0) or 0 if fu else 0
         out_delta = getattr(fu, "output_tokens", 0) or 0 if fu else 0
-        return text, inp_delta, out_delta
+        return text, inp_delta, out_delta, _anthropic_stop(finalize_resp)
 
     def _blocks_to_api_format(self, content: Any) -> List[Dict[str, Any]]:
         """Convert response content blocks to API request format."""
@@ -514,7 +537,7 @@ class AnthropicMessagesClient:
         temperature: Optional[float] = None,
         system_instruct: str = "",
         attachments: Optional[List[Attachment]] = None,
-    ) -> tuple[str, TokenUsage]:
+    ) -> tuple[str, TokenUsage, Optional[Stop]]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
         if not model or not model.strip():
@@ -729,9 +752,10 @@ class AnthropicMessagesClient:
         if not final_text.strip():
             final_text = last_nonempty_output or ""
 
+        stop = _anthropic_stop(last_resp)
         if not final_text.strip():
             try:
-                final_text, inp_delta, out_delta = await self._finalize_empty_response(
+                final_text, inp_delta, out_delta, stop = await self._finalize_empty_response(
                     client, params, base_messages
                 )
                 total_input += inp_delta
@@ -746,8 +770,12 @@ class AnthropicMessagesClient:
         if not final_text.strip():
             raise APIError("Empty response received from Anthropic API")
 
-        return final_text, _token_usage_from_totals(
-            total_input, total_output, total_cached, total_cache_creation
+        return (
+            final_text,
+            _token_usage_from_totals(
+                total_input, total_output, total_cached, total_cache_creation
+            ),
+            stop,
         )
 
     async def generate_stream(
@@ -798,6 +826,7 @@ class AnthropicMessagesClient:
         total_output = 0
         total_cached = 0
         total_cache_creation = 0
+        stop: Optional[Stop] = None
         effective_steps = 0
         consecutive_reasoning_only = 0
         pending_resp: Optional[Any] = None
@@ -921,6 +950,7 @@ class AnthropicMessagesClient:
 
                 content = getattr(resp, "content", []) or []
                 stop_reason = getattr(resp, "stop_reason", None) or "end_turn"
+                stop = _anthropic_stop(resp)
 
                 if not use_tools:
                     break
@@ -997,6 +1027,8 @@ class AnthropicMessagesClient:
                 ):
                     break
 
+            if stop is not None:
+                yield stop
             yield _token_usage_from_totals(
                 total_input, total_output, total_cached, total_cache_creation
             )

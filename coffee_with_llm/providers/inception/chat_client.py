@@ -18,6 +18,8 @@ from ...config import Config
 from ...exceptions import APIError, ConfigurationError, ValidationError
 from ...rate_limit import is_rate_limit_error
 from ...types import (
+    Stop,
+    StopReason,
     StreamStepBoundary,
     StreamTextDelta,
     StreamToolArgumentsDelta,
@@ -26,6 +28,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
+from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -135,6 +138,24 @@ def _extract_cached_tokens(usage: Any) -> Optional[int]:
     return None
 
 
+#: Chat-completions finish reasons, in the words every provider shares.
+_INCEPTION_STOPS = {
+    "stop": StopReason.END,
+    "length": StopReason.MAX_TOKENS,
+    "tool_calls": StopReason.TOOL_USE,
+    "function_call": StopReason.TOOL_USE,
+    "content_filter": StopReason.CONTENT_FILTER,
+}
+
+
+def _chat_stop(resp: Any) -> Optional[Stop]:
+    """Why a chat completion stopped, from its first choice."""
+    choice = (getattr(resp, "choices", None) or [None])[0]
+    if choice is None:
+        return None
+    return stop_from(getattr(choice, "finish_reason", None), _INCEPTION_STOPS)
+
+
 def _usage_from_chat(usage: Any) -> Optional[TokenUsage]:
     if usage is None:
         return None
@@ -143,11 +164,15 @@ def _usage_from_chat(usage: Any) -> Optional[TokenUsage]:
         out = int(getattr(usage, "completion_tokens", 0) or 0)
         total = int(getattr(usage, "total_tokens", 0) or (inp + out))
         cached = _extract_cached_tokens(usage)
+        # Counted within completion_tokens, where the endpoint reports them.
+        details = getattr(usage, "completion_tokens_details", None)
+        reasoning = getattr(details, "reasoning_tokens", None) if details is not None else None
         return TokenUsage(
             input_tokens=inp,
             output_tokens=out,
             total_tokens=total,
             cached_tokens=cached,
+            reasoning_tokens=int(reasoning) if reasoning else None,
         )
     except Exception:
         return None
@@ -367,7 +392,7 @@ class InceptionChatClient:
         client: Any,
         params: Dict[str, Any],
         base_messages: List[Dict[str, Any]],
-    ) -> tuple[str, int, int]:
+    ) -> tuple[str, int, int, Optional[Stop]]:
         finalize_params = dict(params)
         finalize_params.pop("tools", None)
         finalize_params.pop("tool_choice", None)
@@ -386,7 +411,7 @@ class InceptionChatClient:
         usage = getattr(finalize_resp, "usage", None)
         inp = int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
         out = int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0
-        return text, inp, out
+        return text, inp, out, _chat_stop(finalize_resp)
 
     async def generate(
         self,
@@ -411,7 +436,7 @@ class InceptionChatClient:
         temperature: Optional[float] = None,
         system_instruct: str = "",
         attachments: Optional[List[Attachment]] = None,
-    ) -> tuple[str, TokenUsage]:
+    ) -> tuple[str, TokenUsage, Optional[Stop]]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
         if not model or not model.strip():
@@ -447,6 +472,7 @@ class InceptionChatClient:
         pending_resp: Optional[Any] = None
         total_input = 0
         total_output = 0
+        total_reasoning = 0
         total_cached = 0
 
         for step in range(max_steps):
@@ -468,6 +494,7 @@ class InceptionChatClient:
             if step_usage:
                 total_input += step_usage.input_tokens
                 total_output += step_usage.output_tokens
+                total_reasoning += step_usage.reasoning_tokens or 0
                 if step_usage.cached_tokens:
                     total_cached += step_usage.cached_tokens
 
@@ -576,9 +603,10 @@ class InceptionChatClient:
         if not final_text.strip():
             final_text = last_nonempty_output or ""
 
+        stop = _chat_stop(last_resp)
         if not final_text.strip():
             try:
-                final_text, inp_delta, out_delta = await self._finalize_empty_response(
+                final_text, inp_delta, out_delta, stop = await self._finalize_empty_response(
                     client, params, base_messages
                 )
                 total_input += inp_delta
@@ -593,12 +621,14 @@ class InceptionChatClient:
         if not final_text.strip():
             raise APIError("Empty response received from Inception API")
 
-        return final_text, TokenUsage(
+        usage = TokenUsage(
             input_tokens=total_input,
             output_tokens=total_output,
             total_tokens=total_input + total_output,
             cached_tokens=total_cached if total_cached else None,
+            reasoning_tokens=total_reasoning or None,
         )
+        return final_text, usage, stop
 
     async def generate_stream(
         self,
@@ -642,18 +672,21 @@ class InceptionChatClient:
 
         total_input = 0
         total_output = 0
+        total_reasoning = 0
         total_cached = 0
         effective_steps = 0
         consecutive_reasoning_only = 0
         pending_resp: Optional[Any] = None
+        stop: Optional[Stop] = None
 
         def apply_usage(usage: Any) -> None:
-            nonlocal total_input, total_output, total_cached
+            nonlocal total_input, total_output, total_reasoning, total_cached
             step_usage = _usage_from_chat(usage)
             if step_usage is None:
                 return
             total_input += step_usage.input_tokens
             total_output += step_usage.output_tokens
+            total_reasoning += step_usage.reasoning_tokens or 0
             if step_usage.cached_tokens:
                 total_cached += step_usage.cached_tokens
             if usage_sink is not None:
@@ -663,6 +696,7 @@ class InceptionChatClient:
                         total_output,
                         total_input + total_output,
                         total_cached if total_cached else None,
+                        reasoning_tokens=total_reasoning or None,
                     )
                 )
 
@@ -781,6 +815,7 @@ class InceptionChatClient:
                     message = _Msg()
                     tool_calls = self._parse_tool_calls(message)
 
+                stop = stop_from(finish_reason, _INCEPTION_STOPS)
                 if not use_tools:
                     break
 
@@ -845,11 +880,14 @@ class InceptionChatClient:
                 ):
                     break
 
+            if stop is not None:
+                yield stop
             yield TokenUsage(
                 input_tokens=total_input,
                 output_tokens=total_output,
                 total_tokens=total_input + total_output,
                 cached_tokens=total_cached if total_cached else None,
+                reasoning_tokens=total_reasoning or None,
             )
         except Exception as e:
             if is_rate_limit_error(e):

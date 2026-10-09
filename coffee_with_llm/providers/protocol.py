@@ -15,7 +15,7 @@ from typing import (
 )
 
 from ..attachments import Attachment
-from ..types import StreamUsageSink, TokenUsage
+from ..types import Stop, StreamUsageSink, TokenUsage
 
 
 @runtime_checkable
@@ -45,8 +45,8 @@ class ProviderProtocol(Protocol):
         temperature: Optional[float] = None,
         system_instruct: str = "",
         attachments: Optional[List[Attachment]] = None,
-    ) -> tuple[str, TokenUsage]:
-        """Generate text. Returns (text, usage)."""
+    ) -> tuple[str, TokenUsage, Optional[Stop]]:
+        """Generate text. Returns (text, usage, why the last step stopped)."""
         ...
 
     def generate_stream(
@@ -74,7 +74,9 @@ class ProviderProtocol(Protocol):
         usage_sink: Optional[StreamUsageSink] = None,
         attachments: Optional[List[Attachment]] = None,
     ) -> AsyncIterator[Union[object, TokenUsage]]:
-        """Stream :class:`~coffee_with_llm.types.StreamEvent` chunks, then terminal ``TokenUsage``.
+        """Stream :class:`~coffee_with_llm.types.StreamEvent` chunks, then a
+        :class:`~coffee_with_llm.types.Stop` saying why the last step stopped, then
+        terminal ``TokenUsage``.
 
         Pass ``usage_sink`` for best-effort usage on early ``aclose``. Implement as async
         generator; calling it returns the iterator directly.

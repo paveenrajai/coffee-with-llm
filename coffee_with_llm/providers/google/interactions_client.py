@@ -16,11 +16,12 @@ from ...attachments import Attachment
 from ...config import Config
 from ...exceptions import APIError, ConfigurationError, ValidationError
 from ...rate_limit import is_rate_limit_error
-from ...types import StreamUsageSink, TokenUsage
+from ...types import Stop, StopReason, StreamUsageSink, TokenUsage
 from ..tool_utils import normalize_tool_result
 from ._convert_tools import convert_openai_tools_to_interaction_functions
 from .interactions_utils import (
     interaction_function_calls,
+    interaction_stop,
     interaction_text,
     interaction_usage,
 )
@@ -100,7 +101,7 @@ class GoogleInteractionsClient:
         response_mime_type: Optional[str] = None,
         response_format: Optional[Dict[str, Any]] = None,
         include_google_search: Optional[bool] = None,
-    ) -> tuple[str, TokenUsage, str]:
+    ) -> tuple[str, TokenUsage, str, Optional[Stop]]:
         """Create an interaction, optionally looping on function calls.
 
         Returns ``(text, usage, interaction_id)``.
@@ -176,13 +177,17 @@ class GoogleInteractionsClient:
                     (total_usage.cached_tokens or 0) + (step_usage.cached_tokens or 0)
                 )
                 or None,
+                reasoning_tokens=(
+                    (total_usage.reasoning_tokens or 0) + (step_usage.reasoning_tokens or 0)
+                )
+                or None,
             )
             interaction_id = str(getattr(interaction, "id", "") or interaction_id)
             text = interaction_text(interaction)
 
             calls = interaction_function_calls(interaction)
             if not calls or execute_tool_cb is None:
-                return text, total_usage, interaction_id
+                return text, total_usage, interaction_id, interaction_stop(interaction)
 
             result_steps: list[dict[str, Any]] = []
             for call in calls:
@@ -210,7 +215,8 @@ class GoogleInteractionsClient:
             if tools:
                 create_kwargs["tools"] = tools
 
-        return text, total_usage, interaction_id
+        # Out of steps while it was still calling tools.
+        return text, total_usage, interaction_id, Stop(StopReason.TOOL_USE, "max_steps")
 
     async def generate(
         self,
@@ -237,7 +243,7 @@ class GoogleInteractionsClient:
         attachments: Optional[List[Attachment]] = None,
         include_google_search: Optional[bool] = None,
         previous_interaction_id: Optional[str] = None,
-    ) -> tuple[str, TokenUsage]:
+    ) -> tuple[str, TokenUsage, Optional[Stop]]:
         if attachments:
             raise ValidationError("Interactions API does not support attachments yet.")
         if messages:
@@ -250,7 +256,7 @@ class GoogleInteractionsClient:
             logger.debug("top_p/presence_penalty/reasoning_effort ignored for Interactions API")
 
         system = system_instruct or (instructions or "")
-        text, usage, _interaction_id = await self.create_interaction(
+        text, usage, _interaction_id, stop = await self.create_interaction(
             prompt=prompt,
             model=model,
             system_instruct=system,
@@ -263,7 +269,7 @@ class GoogleInteractionsClient:
             response_format=response_format,
             include_google_search=include_google_search,
         )
-        return text, usage
+        return text, usage, stop
 
     def generate_stream(
         self,

@@ -8,6 +8,8 @@ from .llm import AskLLM
 from .providers.google.api_mode import DEFAULT_GOOGLE_API_MODE, GoogleApiMode
 from .types import (
     AskResult,
+    Stop,
+    StopReason,
     StreamResult,
     StreamStepBoundary,
     StreamTextDelta,
@@ -19,7 +21,7 @@ from .types import (
     UrlRetrieval,
 )
 
-__version__ = "0.8.4"
+__version__ = "0.9.0"
 
 __all__ = [
     "__version__",
@@ -35,6 +37,8 @@ __all__ = [
     "estimate_cost",
     "AskLLMError",
     "AskResult",
+    "Stop",
+    "StopReason",
     "StreamResult",
     "StreamStepBoundary",
     "StreamTextDelta",
