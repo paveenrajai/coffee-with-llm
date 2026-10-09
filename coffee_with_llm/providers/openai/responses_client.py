@@ -10,12 +10,15 @@ from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
 from ...types import (
+    Stop,
+    StopReason,
     StreamStepBoundary,
     StreamTextDelta,
     StreamToolCallEnd,
     StreamUsageSink,
     TokenUsage,
 )
+from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -63,6 +66,44 @@ def _build_input_list(
 REASONING_LOG_TOOL_NAME = "reasoning_log"
 REASONING_PREVIEW_LENGTH = 200
 
+
+
+#: A Responses status, or why an incomplete one stopped, in the words every
+#: provider shares. Anything else (failed, cancelled) is kept as OTHER.
+_OPENAI_STOPS = {
+    "completed": StopReason.END,
+    "max_output_tokens": StopReason.MAX_TOKENS,
+    "content_filter": StopReason.CONTENT_FILTER,
+}
+
+
+def _openai_stop(resp: Any) -> Optional[Stop]:
+    """Why OpenAI stopped writing ``resp``.
+
+    An incomplete response says why in ``incomplete_details``. A completed one
+    that still asks for a tool is TOOL_USE.
+    """
+    status = getattr(resp, "status", None)
+    if status is None:
+        return None
+    if status == "incomplete":
+        reason = getattr(getattr(resp, "incomplete_details", None), "reason", None)
+        return stop_from(reason or status, _OPENAI_STOPS)
+    stop = stop_from(status, _OPENAI_STOPS)
+    wants_tools = any(
+        getattr(item, "type", None) == "function_call"
+        for item in (getattr(resp, "output", None) or [])
+    )
+    if stop is not None and stop.reason == StopReason.END and wants_tools:
+        return Stop(StopReason.TOOL_USE, stop.raw)
+    return stop
+
+
+def _reasoning_tokens(usage: Any) -> Optional[int]:
+    """Thinking tokens, a part of ``output_tokens`` on OpenAI."""
+    details = getattr(usage, "output_tokens_details", None)
+    count = getattr(details, "reasoning_tokens", None) if details is not None else None
+    return int(count) if count else None
 
 class OpenAIResponsesClient:
     def __init__(self, config: Config, request_timeout: Optional[float] = None) -> None:
@@ -142,6 +183,7 @@ class OpenAIResponsesClient:
                     output_tokens=int(out),
                     total_tokens=int(total),
                     cached_tokens=int(cached) if cached is not None else None,
+                    reasoning_tokens=_reasoning_tokens(usage),
                 )
         except Exception:
             pass
@@ -163,6 +205,7 @@ class OpenAIResponsesClient:
                 output_tokens=int(out),
                 total_tokens=int(total),
                 cached_tokens=int(cached) if cached is not None else None,
+                reasoning_tokens=_reasoning_tokens(usage),
             )
         except Exception:
             return None
@@ -273,8 +316,8 @@ class OpenAIResponsesClient:
         client: Any,
         params: Dict[str, Any],
         input_list: List[Dict[str, Any]],
-    ) -> tuple[str, Optional[TokenUsage]]:
-        """Finalize when response is empty; returns (final_text, usage_delta)."""
+    ) -> tuple[str, Optional[TokenUsage], Optional[Stop]]:
+        """Finalize when response is empty; returns (final_text, usage_delta, why it stopped)."""
         finalize_params = dict(params)
         finalize_params.pop("tools", None)
         finalize_params_input = list(input_list) + [
@@ -290,7 +333,7 @@ class OpenAIResponsesClient:
         finalize_resp = await client.responses.create(**finalize_params)
         text = getattr(finalize_resp, "output_text", "") or ""
         usage = self._extract_usage(finalize_resp)
-        return text, usage
+        return text, usage, _openai_stop(finalize_resp)
 
     async def _execute_tool_with_context(
         self,
@@ -351,7 +394,7 @@ class OpenAIResponsesClient:
         temperature: Optional[float] = None,
         system_instruct: str = "",
         attachments: Optional[List[Attachment]] = None,
-    ) -> tuple[str, TokenUsage]:
+    ) -> tuple[str, TokenUsage, Optional[Stop]]:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
 
@@ -400,6 +443,7 @@ class OpenAIResponsesClient:
         pending_resp: Optional[Any] = None
         total_input = 0
         total_output = 0
+        total_reasoning = 0
         total_cached: Optional[int] = 0
 
         for step in range(max_steps):
@@ -422,6 +466,7 @@ class OpenAIResponsesClient:
             if step_usage:
                 total_input += step_usage.input_tokens
                 total_output += step_usage.output_tokens
+                total_reasoning += step_usage.reasoning_tokens or 0
                 if step_usage.cached_tokens is not None:
                     total_cached = (total_cached or 0) + step_usage.cached_tokens
 
@@ -586,14 +631,16 @@ class OpenAIResponsesClient:
         if not final_text.strip():
             final_text = last_nonempty_output or ""
 
+        stop = _openai_stop(last_resp)
         if not final_text.strip():
             try:
-                final_text, final_usage = await self._finalize_empty_response(
+                final_text, final_usage, stop = await self._finalize_empty_response(
                     client, params, input_list
                 )
                 if final_usage:
                     total_input += final_usage.input_tokens
                     total_output += final_usage.output_tokens
+                    total_reasoning += final_usage.reasoning_tokens or 0
                     if final_usage.cached_tokens is not None:
                         total_cached = (total_cached or 0) + final_usage.cached_tokens
             except Exception as e:
@@ -612,8 +659,9 @@ class OpenAIResponsesClient:
             output_tokens=total_output,
             total_tokens=total_input + total_output,
             cached_tokens=total_cached if total_cached else None,
+            reasoning_tokens=total_reasoning or None,
         )
-        return final_text, usage
+        return final_text, usage, stop
 
     async def generate_stream(
         self,
@@ -682,18 +730,22 @@ class OpenAIResponsesClient:
 
         total_input = 0
         total_output = 0
+        total_reasoning = 0
         total_cached: Optional[int] = 0
         pending_resp: Optional[Any] = None
         effective_steps = 0
         consecutive_reasoning_only = 0
+        stop: Optional[Stop] = None
 
         def apply_response_step_usage(resp: Any) -> None:
-            nonlocal total_input, total_output, total_cached
+            nonlocal total_input, total_output, total_reasoning, total_cached, stop
             self._log_cache_usage(resp)
+            stop = _openai_stop(resp) or stop
             step_usage = self._extract_usage(resp)
             if step_usage:
                 total_input += step_usage.input_tokens
                 total_output += step_usage.output_tokens
+                total_reasoning += step_usage.reasoning_tokens or 0
                 if step_usage.cached_tokens is not None:
                     total_cached = (total_cached or 0) + step_usage.cached_tokens
                 if usage_sink is not None:
@@ -703,6 +755,7 @@ class OpenAIResponsesClient:
                             total_output,
                             total_input + total_output,
                             total_cached if total_cached else None,
+                            reasoning_tokens=total_reasoning or None,
                         )
                     )
 
@@ -898,11 +951,14 @@ class OpenAIResponsesClient:
                     ):
                         break
 
+            if stop is not None:
+                yield stop
             yield TokenUsage(
                 input_tokens=total_input,
                 output_tokens=total_output,
                 total_tokens=total_input + total_output,
                 cached_tokens=total_cached if total_cached else None,
+                reasoning_tokens=total_reasoning or None,
             )
         except Exception as e:
             if is_rate_limit_error(e):

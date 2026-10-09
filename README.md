@@ -239,12 +239,12 @@ also accepts `"instant"`) — that each provider translates to its native
 extended-thinking config. Pass `None` (or omit) to disable. Unknown values are
 ignored with a warning.
 
-| Effort   | Anthropic (4.6+)     | Anthropic (legacy) / Google | Inception |
-|----------|----------------------|-----------------------------|-----------|
-| `instant`| —                    | —                           | `reasoning_effort=instant` |
-| `low`    | `output_config.effort` | 1,024 token budget          | `reasoning_effort=low` |
-| `medium` | (adaptive thinking)  | 4,096 token budget          | `reasoning_effort=medium` |
-| `high`   |                      | 16,384 token budget         | `reasoning_effort=high` |
+| Effort   | Anthropic (4.6+)     | Google (Gemini 3+)   | Anthropic (legacy) / Google (Gemini 2.x) | Inception |
+|----------|----------------------|----------------------|------------------------------------------|-----------|
+| `instant`| —                    | —                    | —                                        | `reasoning_effort=instant` |
+| `low`    | `output_config.effort` | `thinking_level=low`    | 1,024 token budget                    | `reasoning_effort=low` |
+| `medium` | (adaptive thinking)  | `thinking_level=medium` | 4,096 token budget                    | `reasoning_effort=medium` |
+| `high`   |                      | `thinking_level=high`   | 16,384 token budget                   | `reasoning_effort=high` |
 
 ```python
 # Same call works on OpenAI, Anthropic, Google, or Inception
@@ -274,6 +274,16 @@ Provider-specific notes:
   `cache_creation_tokens` reflects cache writes; both are included in `cost_usd`.
 - **Google (Gemini 2.5+ / 3.x)** — sets `thinking_config` with
   `include_thoughts=False` so only the final answer streams to the caller.
+  Gemini 3 and later are sent `thinking_level`, which Google recommends over
+  the budget (a request with both is refused). Gemini 2.x is sent
+  `thinking_budget`, and so is a model whose name does not say its generation,
+  such as `gemini-flash-latest`: Gemini 3 still accepts a budget, 2.x rejects
+  a level. With no `reasoning_effort`, each model uses its own default level
+  (`medium` on `gemini-3.8-flash`).
+  Thinking counts against `max_tokens`, and is billed as output: it is in
+  `output_tokens` and `cost_usd`, and `reasoning_tokens` says how much. With no
+  `reasoning_effort`, the model thinks as long as it likes, and a long think can
+  use up `max_tokens` before the answer is written; `stop` then says so.
 - **Inception (Mercury)** — passed as `reasoning_effort` on Chat Completions
   (`instant` | `low` | `medium` | `high`). Supports tool calling and structured
   outputs; text-only (no attachments).
@@ -338,6 +348,24 @@ print(result.usage.to_dict())
 
 **Usage and cost:** `result.usage` (including `cost_usd`) is set when the stream finishes normally. If you stop early (`break`), call `await result.aclose()` so usage can be filled from the best-effort `StreamUsageSink` when the provider reported partial usage.
 
+### Why it stopped
+
+A call cut off at `max_tokens` ends exactly like a finished one. `AskResult.stop`,
+and `StreamResult.stop` once the stream has ended, say which, the same way for
+every provider:
+
+```python
+result = await llm.ask(prompt="...", max_tokens=16384)
+if result.stop and result.stop.truncated:
+    ...  # cut off: the answer is not whole
+```
+
+`stop.reason` is one of `StopReason`: `end` (finished), `max_tokens` (cut off),
+`content_filter` (a safety or recitation filter, or a refusal), `tool_use` (it was
+still asking for a tool, e.g. a loop out of steps) or `other`. `stop.raw` is the
+provider's own word: `MAX_TOKENS`, `end_turn`, `max_output_tokens`, `length`.
+A stream never yields the `Stop`; it is read from `result.stop`.
+
 ### Understanding token usage
 
 `TokenUsage` exposes provider-native buckets plus computed totals:
@@ -347,7 +375,8 @@ print(result.usage.to_dict())
 | `input_tokens` | Uncached input billed at the full input rate |
 | `cached_tokens` | Cache **reads** (discounted on Anthropic/OpenAI) |
 | `cache_creation_tokens` | Cache **writes** (Anthropic; billed at 125% of input) |
-| `output_tokens` | Generated output |
+| `output_tokens` | Generated output, thinking included |
+| `reasoning_tokens` | How much of `output_tokens` was thinking (Google, OpenAI, Inception; `None` on Anthropic, which does not count it apart) |
 | `total_tokens` | Legacy: `input_tokens + output_tokens` only |
 | `prompt_tokens` | All prompt-side tokens (input + cache read + cache write) |
 | `billable_tokens` | `prompt_tokens + output_tokens` |
@@ -436,7 +465,7 @@ Generate a response from the LLM.
 - `stream` (bool, optional): When True, return `StreamResult` (default: False)
 - `attachments` (list[Attachment], optional): PDFs or images for the model to read alongside `prompt`. Provider-agnostic — see [Attachments](#attachments-pdfs-and-images).
 
-**Returns:** `AskResult` – Object with `.text` (str), `.usage` (TokenUsage), and `.url_retrievals`: for Gemini, each link in the prompt that URL context tried to open, as `UrlRetrieval(url, ok, status)`. `ok` is false when the site refused the fetch and the answer came from search instead; empty when there was no link, and for other providers. When `stream=True`, returns `StreamResult` – async iterable of stream events (see Streaming above); `.usage` after completion or `aclose()`.
+**Returns:** `AskResult` – Object with `.text` (str), `.usage` (TokenUsage), `.stop` (why it stopped, see above), and `.url_retrievals`: for Gemini, each link in the prompt that URL context tried to open, as `UrlRetrieval(url, ok, status)`. `ok` is false when the site refused the fetch and the answer came from search instead; empty when there was no link, and for other providers. When `stream=True`, returns `StreamResult` – async iterable of stream events (see Streaming above); `.usage` after completion or `aclose()`, `.stop` after completion.
 
 **Raises:**
 - `ValidationError`: If prompt is empty or invalid parameters provided

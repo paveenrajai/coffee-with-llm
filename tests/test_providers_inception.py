@@ -175,7 +175,7 @@ class TestInceptionGenerate:
             mock_openai.return_value = mock_client
 
             client = InceptionChatClient(config=_config())
-            text, usage = await client.generate(prompt="What is a dLLM?", model="mercury-2")
+            text, usage, _stop = await client.generate(prompt="What is a dLLM?", model="mercury-2")
             assert text == "Hello from Mercury"
             assert usage.input_tokens == 10
             assert usage.output_tokens == 5
@@ -231,7 +231,7 @@ class TestInceptionGenerate:
                 return {"ok": True, "result": {"temp": 72}}
 
             client = InceptionChatClient(config=_config())
-            text, usage = await client.generate(
+            text, usage, _stop = await client.generate(
                 prompt="Weather in SF?",
                 model="mercury-2",
                 tools_schema=[

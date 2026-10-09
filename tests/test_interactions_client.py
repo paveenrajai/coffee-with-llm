@@ -11,6 +11,7 @@ from coffee_with_llm.providers.google.interactions_utils import (
     interaction_text,
     interaction_usage,
 )
+from coffee_with_llm.types import Stop, StopReason
 
 
 def _config():
@@ -88,11 +89,14 @@ class TestInteractionUtils:
         usage.total_output_tokens = 5
         usage.total_tokens = 15
         usage.total_cached_tokens = 2
+        usage.total_thought_tokens = 3
         interaction = MagicMock()
         interaction.usage = usage
         mapped = interaction_usage(interaction)
         assert mapped.input_tokens == 10
-        assert mapped.output_tokens == 5
+        # Thinking is billed as output, and counted apart by the API.
+        assert mapped.output_tokens == 8
+        assert mapped.reasoning_tokens == 3
         assert mapped.total_tokens == 15
         assert mapped.cached_tokens == 2
 
@@ -115,16 +119,18 @@ class TestGoogleInteractionsClient:
             interaction.steps = []
             interaction.outputs = []
             interaction.usage = None
+            interaction.status = "completed"
             mock_client.aio.interactions.create = AsyncMock(return_value=interaction)
 
             client = GoogleInteractionsClient(_config())
-            text, usage, interaction_id = await client.create_interaction(
+            text, usage, interaction_id, stop = await client.create_interaction(
                 prompt="Hi",
                 model="gemini-flash-latest",
             )
             assert text == "Done."
             assert interaction_id == "int-123"
             assert usage.total_tokens == 0
+            assert stop == Stop(StopReason.END, "completed")
 
     @pytest.mark.asyncio
     async def test_generate_rejects_attachments(self):

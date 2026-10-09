@@ -378,7 +378,9 @@ class TestAnthropicMessagesClientGenerate:
 
         with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
             client = AnthropicMessagesClient(config=_config())
-            text, usage = await client.generate(prompt="What is Python?", model="claude-sonnet-4-6")
+            text, usage, _stop = await client.generate(
+                prompt="What is Python?", model="claude-sonnet-4-6"
+            )
             assert text == "Test response"
             assert usage is not None
             assert usage.input_tokens == 10
@@ -403,7 +405,7 @@ class TestAnthropicMessagesClientGenerate:
 
         with patch.dict("sys.modules", {"anthropic": fake_anthropic}):
             client = AnthropicMessagesClient(config=_config())
-            text, usage = await client.generate(
+            text, usage, _stop = await client.generate(
                 prompt="Hi",
                 model="claude-sonnet-4-6",
                 instructions="You are helpful.",

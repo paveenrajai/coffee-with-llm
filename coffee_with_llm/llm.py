@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
@@ -14,7 +15,7 @@ from .providers.google.interactions_client import GoogleInteractionsClient
 from .providers.google.text_client import GoogleTextClient
 from .providers.registry import get_google_interactions_client, get_provider, split_provider_model
 from .rate_limit import is_rate_limit_error, is_transient_error, with_retry
-from .types import AskResult, StreamResult, StreamUsageSink, TokenUsage, UrlRetrieval
+from .types import AskResult, Stop, StreamResult, StreamUsageSink, TokenUsage, UrlRetrieval
 
 logger = logging.getLogger(__name__)
 
@@ -273,13 +274,12 @@ class AskLLM:
                 attachments=list(resolved_attachments) or None,
                 **generate_kwargs,
             )
-            text, usage = (
-                result if isinstance(result, tuple) else (result, TokenUsage(0, 0, 0, None))
-            )
+            text, usage, stop = _generated(result)
             return AskResult(
                 text=text,
                 usage=self._usage_with_cost(usage),
                 url_retrievals=tuple(url_retrievals),
+                stop=stop,
             )
 
         try:
@@ -340,7 +340,7 @@ class AskLLM:
         client = self._get_interactions_client()
 
         async def _create() -> AskResult:
-            text, usage, interaction_id = await client.create_interaction(
+            text, usage, interaction_id, stop = await client.create_interaction(
                 prompt=prompt,
                 model=self._model,
                 system_instruct=system_instruct,
@@ -357,6 +357,7 @@ class AskLLM:
                 text=text,
                 usage=self._usage_with_cost(usage),
                 interaction_id=interaction_id,
+                stop=stop,
             )
 
         try:
@@ -432,15 +433,7 @@ class AskLLM:
 
     def _usage_with_cost(self, usage: TokenUsage) -> TokenUsage:
         """Add cost_usd to usage."""
-        cost = estimate_cost(usage, self._model)
-        return TokenUsage(
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            total_tokens=usage.total_tokens,
-            cached_tokens=usage.cached_tokens,
-            cache_creation_tokens=usage.cache_creation_tokens,
-            cost_usd=cost,
-        )
+        return dataclasses.replace(usage, cost_usd=estimate_cost(usage, self._model))
 
     async def _wait_if_needed(self) -> None:
         """Wait if needed to maintain minimum delay between calls."""
@@ -450,3 +443,19 @@ class AskLLM:
                 wait_time = self._min_delay - elapsed
                 await asyncio.sleep(wait_time)
         self._last_call_time = time.perf_counter()
+
+
+def _generated(result: object) -> tuple[str, TokenUsage, Optional[Stop]]:
+    """A provider's ``generate`` result as text, usage and why it stopped.
+
+    The built-in providers return all three. A provider registered from
+    outside may still return ``(text, usage)``, or bare text, and says
+    nothing about why it stopped.
+    """
+    if not isinstance(result, tuple):
+        return str(result), TokenUsage(0, 0, 0, None), None
+    if len(result) == 3:
+        text, usage, stop = result
+        return str(text), usage, stop
+    text, usage = result
+    return str(text), usage, None

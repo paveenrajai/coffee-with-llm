@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...types import TokenUsage
+from ...types import Stop, StopReason, TokenUsage
+from .._stop import stop_from
 
 
 def _step_type(step: Any) -> str | None:
@@ -88,7 +89,9 @@ def interaction_usage(interaction: Any) -> TokenUsage:
     if usage is None:
         return TokenUsage(0, 0, 0, None)
     input_tokens = int(getattr(usage, "total_input_tokens", 0) or 0)
-    output_tokens = int(getattr(usage, "total_output_tokens", 0) or 0)
+    # Thinking is counted apart from the responses, and billed as output.
+    thoughts = int(getattr(usage, "total_thought_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "total_output_tokens", 0) or 0) + thoughts
     total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or input_tokens + output_tokens
     cached = getattr(usage, "total_cached_tokens", None)
     return TokenUsage(
@@ -96,4 +99,20 @@ def interaction_usage(interaction: Any) -> TokenUsage:
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         cached_tokens=int(cached) if cached is not None else None,
+        reasoning_tokens=thoughts or None,
     )
+
+
+#: An interaction's status, in the words every provider shares. Google's
+#: thinking docs: when ``max_output_tokens`` is hit during reasoning, "the
+#: status becomes incomplete", and the answer may be cut off or empty.
+_INTERACTION_STOPS = {
+    "completed": StopReason.END,
+    "incomplete": StopReason.MAX_TOKENS,
+    "requires_action": StopReason.TOOL_USE,
+}
+
+
+def interaction_stop(interaction: Any) -> Stop | None:
+    """Why an interaction stopped, from its status."""
+    return stop_from(getattr(interaction, "status", None), _INTERACTION_STOPS)

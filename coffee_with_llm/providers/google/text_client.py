@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+import re
 import time
 from collections import OrderedDict
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
@@ -16,6 +17,8 @@ from ...config import Config
 from ...exceptions import APIError, ConfigurationError
 from ...rate_limit import is_rate_limit_error
 from ...types import (
+    Stop,
+    StopReason,
     StreamStepBoundary,
     StreamTextDelta,
     StreamToolCallEnd,
@@ -23,7 +26,8 @@ from ...types import (
     TokenUsage,
     UrlRetrieval,
 )
-from .._reasoning import thinking_budget_tokens
+from .._reasoning import normalize_effort, thinking_budget_tokens
+from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
     normalize_tool_result,
@@ -97,29 +101,119 @@ MAX_CACHED_CONTEXTS = 10
 CONTEXT_TTL_SECONDS = 3600  # 1 hour
 
 
+#: Gemini's finish reasons, in the words every provider shares. A function
+#: call ends with STOP; a reason not here is kept as OTHER.
+_GEMINI_STOPS = {
+    "STOP": StopReason.END,
+    "MAX_TOKENS": StopReason.MAX_TOKENS,
+    "SAFETY": StopReason.CONTENT_FILTER,
+    "RECITATION": StopReason.CONTENT_FILTER,
+    "BLOCKLIST": StopReason.CONTENT_FILTER,
+    "PROHIBITED_CONTENT": StopReason.CONTENT_FILTER,
+    "SPII": StopReason.CONTENT_FILTER,
+    "IMAGE_SAFETY": StopReason.CONTENT_FILTER,
+    "IMAGE_PROHIBITED_CONTENT": StopReason.CONTENT_FILTER,
+    "IMAGE_RECITATION": StopReason.CONTENT_FILTER,
+    "TOO_MANY_TOOL_CALLS": StopReason.TOOL_USE,
+}
+
+
+def _gemini_stop(resp: Any, *, wants_tools: bool = False) -> Optional[Stop]:
+    """Why Gemini stopped writing ``resp``.
+
+    A response that still asks for a tool says STOP like a finished one, so
+    ``wants_tools`` marks it. A prompt blocked before any candidate has only
+    its block reason.
+    """
+    if resp is None:
+        return None
+    candidates = getattr(resp, "candidates", None) or []
+    if not candidates:
+        blocked = getattr(getattr(resp, "prompt_feedback", None), "block_reason", None)
+        stop = stop_from(blocked, {})
+        return Stop(StopReason.CONTENT_FILTER, stop.raw) if stop else None
+    stop = stop_from(getattr(candidates[0], "finish_reason", None), _GEMINI_STOPS)
+    if stop is not None and wants_tools and stop.reason == StopReason.END:
+        return Stop(StopReason.TOOL_USE, stop.raw)
+    return stop
+
+
+#: The Gemini generation a model name starts with: ``gemini-3.8-flash`` is 3.
+_GEMINI_GENERATION = re.compile(r"^(?:models/)?gemini-(\d+)")
+
+
+def _takes_thinking_level(model: str) -> bool:
+    """Gemini 3 and later take ``thinking_level``; earlier models reject it.
+
+    Read off the name. One with no generation in it, such as the alias
+    ``gemini-flash-latest``, is not known to take a level, so it keeps the
+    budget, which Gemini 3 still accepts for backward compatibility.
+    """
+    found = _GEMINI_GENERATION.match(model.strip().lower())
+    return found is not None and int(found.group(1)) >= 3
+
+
+def _thinking_config(model: str, reasoning_effort: Optional[str]) -> Optional[Any]:
+    """``reasoning_effort`` as Gemini's thinking config, or ``None`` to send none.
+
+    Gemini 3 and later are sent the level of the same name; Google recommends
+    it over the budget, and a request carrying both is refused with a 400.
+    Earlier models are sent a token budget.
+    """
+    effort = normalize_effort(reasoning_effort)
+    if effort is None:
+        return None
+    if _takes_thinking_level(model):
+        return types.ThinkingConfig(
+            thinking_level=types.ThinkingLevel(effort.upper()),
+            include_thoughts=False,
+        )
+    return types.ThinkingConfig(
+        thinking_budget=thinking_budget_tokens(effort),
+        include_thoughts=False,
+    )
+
+
+def _gemini_tokens(um: Any) -> tuple[int, int, int, Optional[int]]:
+    """Input, output, thinking and cached tokens from one usage_metadata.
+
+    ``candidates_token_count`` leaves the thinking out, which Gemini bills as
+    output, so output here is the two together.
+    """
+    thoughts = int(getattr(um, "thoughts_token_count", 0) or 0)
+    output = int(getattr(um, "candidates_token_count", 0) or 0) + thoughts
+    cached = getattr(um, "cached_content_token_count", None)
+    return (
+        int(getattr(um, "prompt_token_count", 0) or 0),
+        output,
+        thoughts,
+        int(cached) if cached is not None else None,
+    )
+
+
 def _google_stream_chunk_to_usage_sink(
     chunk: Any,
     usage_sink: Optional[StreamUsageSink],
     base_input: int,
     base_output: int,
     base_cached: Optional[int],
+    base_reasoning: int = 0,
 ) -> None:
     """Best-effort usage from a stream chunk (Gemini often fills this on the last chunks)."""
     um = getattr(chunk, "usage_metadata", None)
     if um is None or usage_sink is None:
         return
-    pi = int(getattr(um, "prompt_token_count", 0) or 0)
-    po = int(getattr(um, "candidates_token_count", 0) or 0)
-    cc = getattr(um, "cached_content_token_count", None)
+    pi, po, thoughts, cc = _gemini_tokens(um)
     cached_tokens: Optional[int] = base_cached
     if cc is not None:
-        cached_tokens = (base_cached or 0) + int(cc)
+        cached_tokens = (base_cached or 0) + cc
     usage_sink.replace_with(
         TokenUsage(
             base_input + pi,
             base_output + po,
             base_input + pi + base_output + po,
             cached_tokens if cached_tokens else None,
+            reasoning_tokens=(base_reasoning + thoughts) or None,
         )
     )
 
@@ -251,8 +345,13 @@ class GoogleTextClient:
         tools_schema: Optional[List[Dict[str, Any]]] = None,
         include_google_search: bool = True,
         reasoning_effort: Optional[str] = None,
+        model: str = "",
     ) -> Dict[str, Any]:
-        """Build generation config as dict for Google Gemini API."""
+        """Build generation config as dict for Google Gemini API.
+
+        ``model`` decides how ``reasoning_effort`` is sent: a level to Gemini 3
+        and later, a budget to the rest and to a name that does not say.
+        """
         config_dict: Dict[str, Any] = {}
 
         is_json_response = (
@@ -283,12 +382,9 @@ class GoogleTextClient:
                     config_dict["response_mime_type"] = "application/json"
                     config_dict["response_json_schema"] = json_schema
 
-        budget = thinking_budget_tokens(reasoning_effort)
-        if budget is not None:
-            config_dict["thinking_config"] = types.ThinkingConfig(
-                thinking_budget=budget,
-                include_thoughts=False,
-            )
+        thinking = _thinking_config(model, reasoning_effort)
+        if thinking is not None:
+            config_dict["thinking_config"] = thinking
 
         return config_dict
 
@@ -514,7 +610,7 @@ class GoogleTextClient:
         attachments: Optional[List[Attachment]] = None,
         include_google_search: Optional[bool] = None,
         url_retrievals: Optional[List[UrlRetrieval]] = None,
-    ) -> tuple[str, TokenUsage]:
+    ) -> tuple[str, TokenUsage, Optional[Stop]]:
         """Generate a reply, running the tool loop when tools are given.
 
         ``url_retrievals``, when passed, is filled with each link URL context
@@ -550,6 +646,7 @@ class GoogleTextClient:
             tools_schema=tools_schema if use_tools else None,
             include_google_search=search_enabled and not use_tools,
             reasoning_effort=reasoning_effort,
+            model=model,
         )
 
         request_kwargs: Dict[str, Any] = {
@@ -567,16 +664,18 @@ class GoogleTextClient:
         consecutive_reasoning_only = 0
         total_input = 0
         total_output = 0
+        total_reasoning = 0
         total_cached: Optional[int] = None
         retrieved: List[UrlRetrieval] = []
 
         def count(resp: Any) -> None:
-            nonlocal total_input, total_output, total_cached
+            nonlocal total_input, total_output, total_reasoning, total_cached
             um = getattr(resp, "usage_metadata", None)
             if um:
-                total_input += getattr(um, "prompt_token_count", 0) or 0
-                total_output += getattr(um, "candidates_token_count", 0) or 0
-                cc = getattr(um, "cached_content_token_count", None)
+                pi, po, thoughts, cc = _gemini_tokens(um)
+                total_input += pi
+                total_output += po
+                total_reasoning += thoughts
                 if cc is not None:
                     total_cached = (total_cached or 0) + cc
             retrieved.extend(_url_retrievals(resp))
@@ -715,8 +814,12 @@ class GoogleTextClient:
             output_tokens=total_output,
             total_tokens=total_input + total_output,
             cached_tokens=total_cached if total_cached else None,
+            reasoning_tokens=total_reasoning or None,
         )
-        return text, usage
+        stop = _gemini_stop(
+            last_resp, wants_tools=use_tools and bool(self._extract_function_calls(last_resp))
+        )
+        return text, usage, stop
 
     async def generate_stream(
         self,
@@ -771,6 +874,7 @@ class GoogleTextClient:
             tools_schema=tools_schema if use_tools else None,
             include_google_search=include_search,
             reasoning_effort=reasoning_effort,
+            model=model,
         )
 
         request_kwargs: Dict[str, Any] = {
@@ -783,9 +887,11 @@ class GoogleTextClient:
 
         total_input = 0
         total_output = 0
+        total_reasoning = 0
         total_cached: Optional[int] = None
         effective_steps = 0
         consecutive_reasoning_only = 0
+        stop: Optional[Stop] = None
 
         try:
             for step in range(max_steps):
@@ -802,7 +908,12 @@ class GoogleTextClient:
                         if text:
                             yield StreamTextDelta(text)
                         _google_stream_chunk_to_usage_sink(
-                            chunk, usage_sink, total_input, total_output, total_cached
+                            chunk,
+                            usage_sink,
+                            total_input,
+                            total_output,
+                            total_cached,
+                            total_reasoning,
                         )
                 finally:
                     # Drain remainder for usage_metadata only (consumer may have stopped early).
@@ -810,7 +921,12 @@ class GoogleTextClient:
                         async for chunk in stream:
                             last_chunk = chunk
                             _google_stream_chunk_to_usage_sink(
-                                chunk, usage_sink, total_input, total_output, total_cached
+                                chunk,
+                                usage_sink,
+                                total_input,
+                                total_output,
+                                total_cached,
+                                total_reasoning,
                             )
                     except Exception as e:
                         logger.debug("Google stream drain for usage: %s", e, exc_info=True)
@@ -820,11 +936,12 @@ class GoogleTextClient:
 
                 um = getattr(last_chunk, "usage_metadata", None)
                 if um:
-                    total_input += getattr(um, "prompt_token_count", 0) or 0
-                    total_output += getattr(um, "candidates_token_count", 0) or 0
-                    cc = getattr(um, "cached_content_token_count", None)
+                    pi, po, thoughts, cc = _gemini_tokens(um)
+                    total_input += pi
+                    total_output += po
+                    total_reasoning += thoughts
                     if cc is not None:
-                        total_cached = (total_cached or 0) + int(cc)
+                        total_cached = (total_cached or 0) + cc
                     if usage_sink is not None:
                         usage_sink.replace_with(
                             TokenUsage(
@@ -832,13 +949,12 @@ class GoogleTextClient:
                                 total_output,
                                 total_input + total_output,
                                 total_cached if total_cached else None,
+                                reasoning_tokens=total_reasoning or None,
                             )
                         )
 
-                if not use_tools:
-                    break
-
-                function_calls = self._extract_function_calls(last_chunk)
+                function_calls = self._extract_function_calls(last_chunk) if use_tools else []
+                stop = _gemini_stop(last_chunk, wants_tools=bool(function_calls))
                 if not function_calls:
                     break
 
@@ -899,11 +1015,14 @@ class GoogleTextClient:
                 ):
                     break
 
+            if stop is not None:
+                yield stop
             yield TokenUsage(
                 input_tokens=total_input,
                 output_tokens=total_output,
                 total_tokens=total_input + total_output,
                 cached_tokens=total_cached if total_cached else None,
+                reasoning_tokens=total_reasoning or None,
             )
         except Exception as e:
             if is_rate_limit_error(e):
