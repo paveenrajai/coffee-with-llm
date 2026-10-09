@@ -319,3 +319,13 @@ async def test_a_streamed_ask_says_why_it_stopped_once_it_ends() -> None:
     assert texts == ["On 26 April 1986…"]
     assert stream.stop == Stop(StopReason.MAX_TOKENS, "MAX_TOKENS")
     assert stream.usage is not None and stream.usage.reasoning_tokens == 15_768
+
+
+def test_an_interaction_cut_off_while_thinking_is_max_tokens() -> None:
+    """Google: hitting max_output_tokens during reasoning leaves it incomplete."""
+    from coffee_with_llm.providers.google.interactions_utils import interaction_stop
+
+    assert interaction_stop(SimpleNamespace(status="incomplete")) == Stop(
+        StopReason.MAX_TOKENS, "incomplete"
+    )
+    assert interaction_stop(SimpleNamespace(status="failed")) == Stop(StopReason.OTHER, "failed")

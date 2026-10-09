@@ -103,10 +103,12 @@ def interaction_usage(interaction: Any) -> TokenUsage:
     )
 
 
-#: An interaction's status, in the words every provider shares. An
-#: ``incomplete`` one is kept as OTHER: the API does not say why.
+#: An interaction's status, in the words every provider shares. Google's
+#: thinking docs: when ``max_output_tokens`` is hit during reasoning, "the
+#: status becomes incomplete", and the answer may be cut off or empty.
 _INTERACTION_STOPS = {
     "completed": StopReason.END,
+    "incomplete": StopReason.MAX_TOKENS,
     "requires_action": StopReason.TOOL_USE,
 }
 
