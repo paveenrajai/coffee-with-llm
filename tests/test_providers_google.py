@@ -158,6 +158,31 @@ class TestGoogleTextClientBuildConfigDict:
             assert tc.thinking_budget == 16384
             assert tc.include_thoughts is False
 
+    def test_gemini_3_is_sent_a_level_not_a_budget(self):
+        """Google recommends the level on Gemini 3, and refuses both together."""
+        from google.genai import types
+
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            client = GoogleTextClient(config=_config())
+            for model in ("gemini-3.8-flash", "models/gemini-3.1-pro-preview", "gemini-10-x"):
+                tc = client._build_config_dict(reasoning_effort="medium", model=model)[
+                    "thinking_config"
+                ]
+                assert tc.thinking_level == types.ThinkingLevel.MEDIUM, model
+                assert tc.thinking_budget is None, model
+                assert tc.include_thoughts is False
+
+    def test_gemini_2_and_an_alias_are_sent_a_budget(self):
+        """Gemini 2.x rejects a level; an alias may be either, and 3 takes a budget."""
+        with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
+            client = GoogleTextClient(config=_config())
+            for model in ("gemini-2.5-flash", "gemini-flash-latest", "gemma-3-27b-it"):
+                tc = client._build_config_dict(reasoning_effort="high", model=model)[
+                    "thinking_config"
+                ]
+                assert tc.thinking_budget == 16384, model
+                assert tc.thinking_level is None, model
+
     def test_build_config_unknown_effort_is_ignored(self):
         with patch("coffee_with_llm.providers.google.text_client.genai.Client"):
             client = GoogleTextClient(config=_config())
@@ -510,3 +535,17 @@ class TestGoogleUrlRetrievals:
             prompt="Hello", model="gemini-flash-latest", url_retrievals=retrievals
         )
         assert retrievals == []
+
+
+class TestGoogleThinkingLevel:
+    """A generate request names its model, so the config can choose level or budget."""
+
+    async def test_a_gemini_3_request_carries_the_level(self):
+        from google.genai import types
+
+        client, requests = _client_answering(_text_response("Done."))
+        await client.generate(prompt="Hi", model="gemini-3.8-flash", reasoning_effort="low")
+
+        thinking = requests[0]["config"]["thinking_config"]
+        assert thinking.thinking_level == types.ThinkingLevel.LOW
+        assert thinking.thinking_budget is None

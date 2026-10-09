@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import logging
+import re
 import time
 from collections import OrderedDict
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
@@ -25,7 +26,7 @@ from ...types import (
     TokenUsage,
     UrlRetrieval,
 )
-from .._reasoning import thinking_budget_tokens
+from .._reasoning import normalize_effort, thinking_budget_tokens
 from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
@@ -135,6 +136,42 @@ def _gemini_stop(resp: Any, *, wants_tools: bool = False) -> Optional[Stop]:
     if stop is not None and wants_tools and stop.reason == StopReason.END:
         return Stop(StopReason.TOOL_USE, stop.raw)
     return stop
+
+
+#: The Gemini generation a model name starts with: ``gemini-3.8-flash`` is 3.
+_GEMINI_GENERATION = re.compile(r"^(?:models/)?gemini-(\d+)")
+
+
+def _takes_thinking_level(model: str) -> bool:
+    """Gemini 3 and later take ``thinking_level``; earlier models reject it.
+
+    Read off the name. One with no generation in it, such as the alias
+    ``gemini-flash-latest``, is not known to take a level, so it keeps the
+    budget, which Gemini 3 still accepts for backward compatibility.
+    """
+    found = _GEMINI_GENERATION.match(model.strip().lower())
+    return found is not None and int(found.group(1)) >= 3
+
+
+def _thinking_config(model: str, reasoning_effort: Optional[str]) -> Optional[Any]:
+    """``reasoning_effort`` as Gemini's thinking config, or ``None`` to send none.
+
+    Gemini 3 and later are sent the level of the same name; Google recommends
+    it over the budget, and a request carrying both is refused with a 400.
+    Earlier models are sent a token budget.
+    """
+    effort = normalize_effort(reasoning_effort)
+    if effort is None:
+        return None
+    if _takes_thinking_level(model):
+        return types.ThinkingConfig(
+            thinking_level=types.ThinkingLevel(effort.upper()),
+            include_thoughts=False,
+        )
+    return types.ThinkingConfig(
+        thinking_budget=thinking_budget_tokens(effort),
+        include_thoughts=False,
+    )
 
 
 def _gemini_tokens(um: Any) -> tuple[int, int, int, Optional[int]]:
@@ -308,8 +345,13 @@ class GoogleTextClient:
         tools_schema: Optional[List[Dict[str, Any]]] = None,
         include_google_search: bool = True,
         reasoning_effort: Optional[str] = None,
+        model: str = "",
     ) -> Dict[str, Any]:
-        """Build generation config as dict for Google Gemini API."""
+        """Build generation config as dict for Google Gemini API.
+
+        ``model`` decides how ``reasoning_effort`` is sent: a level to Gemini 3
+        and later, a budget to the rest and to a name that does not say.
+        """
         config_dict: Dict[str, Any] = {}
 
         is_json_response = (
@@ -340,12 +382,9 @@ class GoogleTextClient:
                     config_dict["response_mime_type"] = "application/json"
                     config_dict["response_json_schema"] = json_schema
 
-        budget = thinking_budget_tokens(reasoning_effort)
-        if budget is not None:
-            config_dict["thinking_config"] = types.ThinkingConfig(
-                thinking_budget=budget,
-                include_thoughts=False,
-            )
+        thinking = _thinking_config(model, reasoning_effort)
+        if thinking is not None:
+            config_dict["thinking_config"] = thinking
 
         return config_dict
 
@@ -607,6 +646,7 @@ class GoogleTextClient:
             tools_schema=tools_schema if use_tools else None,
             include_google_search=search_enabled and not use_tools,
             reasoning_effort=reasoning_effort,
+            model=model,
         )
 
         request_kwargs: Dict[str, Any] = {
@@ -834,6 +874,7 @@ class GoogleTextClient:
             tools_schema=tools_schema if use_tools else None,
             include_google_search=include_search,
             reasoning_effort=reasoning_effort,
+            model=model,
         )
 
         request_kwargs: Dict[str, Any] = {

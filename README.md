@@ -239,12 +239,12 @@ also accepts `"instant"`) — that each provider translates to its native
 extended-thinking config. Pass `None` (or omit) to disable. Unknown values are
 ignored with a warning.
 
-| Effort   | Anthropic (4.6+)     | Anthropic (legacy) / Google | Inception |
-|----------|----------------------|-----------------------------|-----------|
-| `instant`| —                    | —                           | `reasoning_effort=instant` |
-| `low`    | `output_config.effort` | 1,024 token budget          | `reasoning_effort=low` |
-| `medium` | (adaptive thinking)  | 4,096 token budget          | `reasoning_effort=medium` |
-| `high`   |                      | 16,384 token budget         | `reasoning_effort=high` |
+| Effort   | Anthropic (4.6+)     | Google (Gemini 3+)   | Anthropic (legacy) / Google (Gemini 2.x) | Inception |
+|----------|----------------------|----------------------|------------------------------------------|-----------|
+| `instant`| —                    | —                    | —                                        | `reasoning_effort=instant` |
+| `low`    | `output_config.effort` | `thinking_level=low`    | 1,024 token budget                    | `reasoning_effort=low` |
+| `medium` | (adaptive thinking)  | `thinking_level=medium` | 4,096 token budget                    | `reasoning_effort=medium` |
+| `high`   |                      | `thinking_level=high`   | 16,384 token budget                   | `reasoning_effort=high` |
 
 ```python
 # Same call works on OpenAI, Anthropic, Google, or Inception
@@ -274,6 +274,12 @@ Provider-specific notes:
   `cache_creation_tokens` reflects cache writes; both are included in `cost_usd`.
 - **Google (Gemini 2.5+ / 3.x)** — sets `thinking_config` with
   `include_thoughts=False` so only the final answer streams to the caller.
+  Gemini 3 and later are sent `thinking_level`, which Google recommends over
+  the budget (a request with both is refused). Gemini 2.x is sent
+  `thinking_budget`, and so is a model whose name does not say its generation,
+  such as `gemini-flash-latest`: Gemini 3 still accepts a budget, 2.x rejects
+  a level. With no `reasoning_effort`, each model uses its own default level
+  (`medium` on `gemini-3.8-flash`).
   Thinking counts against `max_tokens`, and is billed as output: it is in
   `output_tokens` and `cost_usd`, and `reasoning_tokens` says how much. With no
   `reasoning_effort`, the model thinks as long as it likes, and a long think can

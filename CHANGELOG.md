@@ -12,6 +12,7 @@ All notable changes to `coffee_with_llm` are documented here.
 ### Changed
 
 - **Gemini's `output_tokens` and `cost_usd` include its thinking**, which Google bills as output. They left it out, so a call that thought for 15,000 tokens and wrote 600 was reported and priced as 600. The Interactions API is counted the same way.
+- **Gemini 3 and later are sent `thinking_level`, not `thinking_budget`.** `reasoning_effort` `low`, `medium` and `high` become the level of the same name, which Google recommends for Gemini 3; a request carrying both is refused. Gemini 2.x, and a model whose name does not say its generation (`gemini-flash-latest`), are still sent a budget, which Gemini 3 accepts and 2.x requires.
 - **A provider's `generate` returns `(text, usage, stop)`.** One registered from outside that still returns `(text, usage)` keeps working, and says nothing about why it stopped.
 
 ## [0.8.4] - 2026-10-05
