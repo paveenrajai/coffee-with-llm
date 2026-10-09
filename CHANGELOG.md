@@ -2,6 +2,20 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.11.0] - 2026-10-09
+
+### Added
+
+- **`StreamResult.usage_so_far`: the usage the chunks received so far carried**, priced like `usage`, and `None` while no chunk has carried any. Reading it never closes, drains or awaits the stream, so a caller can charge for a stream it is cancelling. Once the stream has ended it is `usage`.
+
+### Changed
+
+- **A Gemini stream stopped part way is closed, not read to its end.** A stream closed by its caller, or whose task was cancelled, read the rest of the generation to fill its usage: Google generated and billed it, nobody saw it, and a caller that closed a stream to retry waited for the whole tail first. The stream is now closed at once, which stops the generation, and its usage is the running total of the chunks received. Other providers are unchanged.
+
+### Fixed
+
+- **The Gemini usage sink no longer lags one chunk behind the text.** It took a chunk's usage after the chunk's text was handed out, so a caller holding chunk N's text read chunk N-1's total.
+
 ## [0.10.1] - 2026-10-09
 
 ### Changed

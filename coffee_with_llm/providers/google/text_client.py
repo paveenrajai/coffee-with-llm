@@ -220,6 +220,17 @@ def _google_stream_chunk_to_usage_sink(
     )
 
 
+async def _close_unread(stream: Any) -> None:
+    """Close a google-genai stream without reading what is left of it."""
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception as e:
+        logger.debug("Google stream close: %s", e, exc_info=True)
+
+
 # Gemini API rejects these JSON Schema keys; strip them when converting.
 _GEMINI_REJECTED_KEYS = frozenset(
     {
@@ -910,9 +921,8 @@ class GoogleTextClient:
                 try:
                     async for chunk in stream:
                         last_chunk = chunk
-                        text = getattr(chunk, "text", None) or ""
-                        if text:
-                            yield StreamTextDelta(text)
+                        # Before the text goes out: a caller holding this
+                        # chunk's text reads this chunk's usage so far.
                         _google_stream_chunk_to_usage_sink(
                             chunk,
                             usage_sink,
@@ -921,21 +931,17 @@ class GoogleTextClient:
                             total_cached,
                             total_reasoning,
                         )
-                finally:
-                    # Drain remainder for usage_metadata only (consumer may have stopped early).
-                    try:
-                        async for chunk in stream:
-                            last_chunk = chunk
-                            _google_stream_chunk_to_usage_sink(
-                                chunk,
-                                usage_sink,
-                                total_input,
-                                total_output,
-                                total_cached,
-                                total_reasoning,
-                            )
-                    except Exception as e:
-                        logger.debug("Google stream drain for usage: %s", e, exc_info=True)
+                        text = getattr(chunk, "text", None) or ""
+                        if text:
+                            yield StreamTextDelta(text)
+                except BaseException:
+                    # Stopped early: closed by its caller, its task cancelled,
+                    # or the read failed. The rest is never read: Google would
+                    # generate and bill all of it for nobody, and whoever
+                    # closed this would wait for it. Its usage is the running
+                    # total the chunks so far carried, in the sink.
+                    await _close_unread(stream)
+                    raise
 
                 if last_chunk is None:
                     break

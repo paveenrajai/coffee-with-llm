@@ -205,6 +205,12 @@ class StreamUsageSink:
     _cache_creation: Optional[int] = None
     _reasoning: Optional[int] = None
     _served_model: Optional[str] = None
+    _has_usage: bool = False
+
+    @property
+    def has_usage(self) -> bool:
+        """True once the provider has reported any usage into this sink."""
+        return self._has_usage
 
     def merge(
         self,
@@ -215,6 +221,7 @@ class StreamUsageSink:
         cache_creation: Optional[int] = None,
         reasoning: Optional[int] = None,
     ) -> None:
+        self._has_usage = True
         self._input += int(inp)
         self._output += int(out)
         if cached is not None:
@@ -225,6 +232,7 @@ class StreamUsageSink:
             self._reasoning = (self._reasoning or 0) + int(reasoning)
 
     def replace_with(self, usage: TokenUsage) -> None:
+        self._has_usage = True
         self._input = usage.input_tokens
         self._output = usage.output_tokens
         self._cached = usage.cached_tokens
@@ -354,7 +362,10 @@ class StreamResult:
         self._finalize_usage_if_needed()
 
     def _apply_usage(self, usage: TokenUsage) -> None:
-        self._usage = self._usage_callback(usage) if self._usage_callback else usage
+        self._usage = self._priced(usage)
+
+    def _priced(self, usage: TokenUsage) -> TokenUsage:
+        return self._usage_callback(usage) if self._usage_callback else usage
 
     def _finalize_usage_if_needed(self) -> None:
         if self._usage is not None:
@@ -374,6 +385,22 @@ class StreamResult:
     @property
     def usage(self) -> Optional[TokenUsage]:
         return self._usage
+
+    @property
+    def usage_so_far(self) -> Optional[TokenUsage]:
+        """The usage the provider has reported in the chunks received so far,
+        priced like ``usage``.
+
+        For a caller that stops reading mid-stream and must not wait: it reads
+        only what has already arrived, and never closes, drains or awaits the
+        stream. ``usage`` once that is set. ``None`` while no chunk has carried usage,
+        and for a provider that reports it only at the end.
+        """
+        if self._usage is not None:
+            return self._usage
+        if self._usage_sink is None or not self._usage_sink.has_usage:
+            return None
+        return self._priced(self._usage_sink.snapshot())
 
     @property
     def stop(self) -> Optional[Stop]:
