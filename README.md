@@ -380,7 +380,16 @@ A stream never yields the `Stop`; it is read from `result.stop`.
 | `total_tokens` | Legacy: `input_tokens + output_tokens` only |
 | `prompt_tokens` | All prompt-side tokens (input + cache read + cache write) |
 | `billable_tokens` | `prompt_tokens + output_tokens` |
-| `cost_usd` | Estimated USD (includes cache buckets when priced) |
+| `cost_usd` | Estimated USD (includes cache buckets when priced), at the price of `served_model` on the day of the call |
+| `served_model` | The model the provider says served the call: for an alias such as `gemini-flash-lite-latest`, whatever it points to today. `None` when the provider did not say |
+
+An alias has no price of its own: Google swaps it to a new model with every
+release. A call is priced at the model that served it, and at the model asked
+for only when the provider did not say. A model with no price is left with
+`cost_usd=None` and a warning naming it, never priced as another model.
+Prices that change on a date (Gemini 3.8, 3.7 and 3.6 Flash double on
+2027-01-01) are applied by the day of the call; `estimate_cost(usage, model,
+on=date(...))` prices another day.
 
 On Anthropic with prompt caching enabled (default), the **first** turn of a long system prompt often looks like `input_tokens=2` with most prompt tokens in `cache_creation_tokens` — not a metering bug. Use `usage.to_dict()` for logging and dashboards.
 

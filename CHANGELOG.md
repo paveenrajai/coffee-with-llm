@@ -2,6 +2,22 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.10.0] - 2026-10-09
+
+### Added
+
+- **`TokenUsage.served_model`: the model that served the call**, as the provider named it in its reply: Gemini's `model_version`, and `model` from OpenAI, Anthropic, Inception and the Interactions API. For an alias, it is whatever the alias points to today.
+- **Gemini 3 prices** from Google's pricing page: 3.8, 3.7 and 3.6 Flash ($0.75 / $3.75 / $0.075 cached through 2026, doubling from 2027-01-01), 3.5 Flash, 3.5 Flash-Lite and 3.1 Flash-Lite. `estimate_cost` takes `on=` for a price that changes on a date, and defaults to today.
+
+### Changed
+
+- **A call is priced at the model that served it.** `gemini-flash-lite-latest` was priced as 2.5 Flash-Lite while Google served 3.5 Flash-Lite, at three times the input price and six times the output; `gemini-flash-latest` as 2.5 Flash while it served 3.8 Flash. The alias rows are gone: an alias is swapped with every release and has no price of its own. The model asked for is priced only when the provider did not say what served it.
+- **A model with no price is left unpriced and logged**, never priced as another model. `gemini-3.8-flash` had none, so every call to it had `cost_usd=None`.
+
+### Fixed
+
+- **2.5 Flash-Lite and 3.1 Flash-Lite are priced as Flash-Lite.** 2.5 Flash-Lite came after 2.5 Flash in the table and matched it first; 3.1 Flash-Lite without `-preview` matched 3.1 Flash.
+
 ## [0.9.0] - 2026-10-09
 
 ### Added

@@ -27,6 +27,7 @@ from ...types import (
     UrlRetrieval,
 )
 from .._reasoning import normalize_effort, thinking_budget_tokens
+from .._served import served_model
 from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
@@ -214,6 +215,7 @@ def _google_stream_chunk_to_usage_sink(
             base_input + pi + base_output + po,
             cached_tokens if cached_tokens else None,
             reasoning_tokens=(base_reasoning + thoughts) or None,
+            served_model=served_model(getattr(chunk, "model_version", None)),
         )
     )
 
@@ -666,10 +668,12 @@ class GoogleTextClient:
         total_output = 0
         total_reasoning = 0
         total_cached: Optional[int] = None
+        served: Optional[str] = None
         retrieved: List[UrlRetrieval] = []
 
         def count(resp: Any) -> None:
-            nonlocal total_input, total_output, total_reasoning, total_cached
+            nonlocal total_input, total_output, total_reasoning, total_cached, served
+            served = served_model(getattr(resp, "model_version", None)) or served
             um = getattr(resp, "usage_metadata", None)
             if um:
                 pi, po, thoughts, cc = _gemini_tokens(um)
@@ -815,6 +819,7 @@ class GoogleTextClient:
             total_tokens=total_input + total_output,
             cached_tokens=total_cached if total_cached else None,
             reasoning_tokens=total_reasoning or None,
+            served_model=served,
         )
         stop = _gemini_stop(
             last_resp, wants_tools=use_tools and bool(self._extract_function_calls(last_resp))
@@ -892,6 +897,7 @@ class GoogleTextClient:
         effective_steps = 0
         consecutive_reasoning_only = 0
         stop: Optional[Stop] = None
+        served: Optional[str] = None
 
         try:
             for step in range(max_steps):
@@ -934,6 +940,7 @@ class GoogleTextClient:
                 if last_chunk is None:
                     break
 
+                served = served_model(getattr(last_chunk, "model_version", None)) or served
                 um = getattr(last_chunk, "usage_metadata", None)
                 if um:
                     pi, po, thoughts, cc = _gemini_tokens(um)
@@ -950,6 +957,7 @@ class GoogleTextClient:
                                 total_input + total_output,
                                 total_cached if total_cached else None,
                                 reasoning_tokens=total_reasoning or None,
+                                served_model=served,
                             )
                         )
 
@@ -1023,6 +1031,7 @@ class GoogleTextClient:
                 total_tokens=total_input + total_output,
                 cached_tokens=total_cached if total_cached else None,
                 reasoning_tokens=total_reasoning or None,
+                served_model=served,
             )
         except Exception as e:
             if is_rate_limit_error(e):

@@ -181,6 +181,7 @@ class GoogleInteractionsClient:
                     (total_usage.reasoning_tokens or 0) + (step_usage.reasoning_tokens or 0)
                 )
                 or None,
+                served_model=step_usage.served_model or total_usage.served_model,
             )
             interaction_id = str(getattr(interaction, "id", "") or interaction_id)
             text = interaction_text(interaction)

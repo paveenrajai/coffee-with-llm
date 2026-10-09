@@ -18,6 +18,7 @@ from ...types import (
     StreamUsageSink,
     TokenUsage,
 )
+from .._served import served_model
 from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
@@ -184,6 +185,7 @@ class OpenAIResponsesClient:
                     total_tokens=int(total),
                     cached_tokens=int(cached) if cached is not None else None,
                     reasoning_tokens=_reasoning_tokens(usage),
+                    served_model=served_model(getattr(event, "model", None)),
                 )
         except Exception:
             pass
@@ -206,6 +208,7 @@ class OpenAIResponsesClient:
                 total_tokens=int(total),
                 cached_tokens=int(cached) if cached is not None else None,
                 reasoning_tokens=_reasoning_tokens(usage),
+                served_model=served_model(getattr(resp, "model", None)),
             )
         except Exception:
             return None
@@ -445,6 +448,7 @@ class OpenAIResponsesClient:
         total_output = 0
         total_reasoning = 0
         total_cached: Optional[int] = 0
+        served: Optional[str] = None
 
         for step in range(max_steps):
             try:
@@ -467,6 +471,7 @@ class OpenAIResponsesClient:
                 total_input += step_usage.input_tokens
                 total_output += step_usage.output_tokens
                 total_reasoning += step_usage.reasoning_tokens or 0
+                served = step_usage.served_model or served
                 if step_usage.cached_tokens is not None:
                     total_cached = (total_cached or 0) + step_usage.cached_tokens
 
@@ -660,6 +665,7 @@ class OpenAIResponsesClient:
             total_tokens=total_input + total_output,
             cached_tokens=total_cached if total_cached else None,
             reasoning_tokens=total_reasoning or None,
+            served_model=served,
         )
         return final_text, usage, stop
 
@@ -736,9 +742,10 @@ class OpenAIResponsesClient:
         effective_steps = 0
         consecutive_reasoning_only = 0
         stop: Optional[Stop] = None
+        served: Optional[str] = None
 
         def apply_response_step_usage(resp: Any) -> None:
-            nonlocal total_input, total_output, total_reasoning, total_cached, stop
+            nonlocal total_input, total_output, total_reasoning, total_cached, stop, served
             self._log_cache_usage(resp)
             stop = _openai_stop(resp) or stop
             step_usage = self._extract_usage(resp)
@@ -746,6 +753,7 @@ class OpenAIResponsesClient:
                 total_input += step_usage.input_tokens
                 total_output += step_usage.output_tokens
                 total_reasoning += step_usage.reasoning_tokens or 0
+                served = step_usage.served_model or served
                 if step_usage.cached_tokens is not None:
                     total_cached = (total_cached or 0) + step_usage.cached_tokens
                 if usage_sink is not None:
@@ -756,6 +764,7 @@ class OpenAIResponsesClient:
                             total_input + total_output,
                             total_cached if total_cached else None,
                             reasoning_tokens=total_reasoning or None,
+                            served_model=served,
                         )
                     )
 
@@ -959,6 +968,7 @@ class OpenAIResponsesClient:
                 total_tokens=total_input + total_output,
                 cached_tokens=total_cached if total_cached else None,
                 reasoning_tokens=total_reasoning or None,
+                served_model=served,
             )
         except Exception as e:
             if is_rate_limit_error(e):

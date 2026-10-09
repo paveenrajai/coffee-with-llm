@@ -8,63 +8,85 @@ Sources: openai.com/api/pricing, ai.google.dev/pricing, anthropic.com/pricing
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from typing import Optional, Tuple
 
 from .types import TokenUsage
 
-# (input_per_1m, output_per_1m, cached_per_1m or None) USD
-# Order: most specific prefix first
-_MODEL_PRICING: list[Tuple[str, float, float, Optional[float]]] = [
+# (prefix, input_per_1m, output_per_1m, cached_per_1m or None, from) USD.
+# Order: most specific prefix first, and for one prefix the latest price
+# first. ``from`` is the first day a price applies, ``None`` for since ever.
+# Names only: an alias such as gemini-flash-lite-latest has no price of its
+# own, and a call is priced at the model the provider says served it.
+_MODEL_PRICING: list[Tuple[str, float, float, Optional[float], Optional[date]]] = [
     # OpenAI
-    ("gpt-5.4", 2.50, 15.00, 0.25),
-    ("gpt-5.2", 1.75, 14.00, None),
-    ("gpt-5-mini", 0.25, 2.00, 0.025),
-    ("gpt-5-nano", 0.05, 0.40, None),
-    ("gpt-4o-mini", 0.15, 0.60, None),
-    ("gpt-4o", 2.50, 10.00, 1.25),
+    ("gpt-5.4", 2.50, 15.00, 0.25, None),
+    ("gpt-5.2", 1.75, 14.00, None, None),
+    ("gpt-5-mini", 0.25, 2.00, 0.025, None),
+    ("gpt-5-nano", 0.05, 0.40, None, None),
+    ("gpt-4o-mini", 0.15, 0.60, None, None),
+    ("gpt-4o", 2.50, 10.00, 1.25, None),
     # Anthropic (cached_per_1m ≈ 10% of input per anthropic.com/pricing)
-    ("claude-sonnet-5", 3.00, 15.00, 0.30),
-    ("claude-sonnet-4-6", 3.00, 15.00, 0.30),
-    ("claude-opus-4-8", 5.00, 25.00, 0.50),
-    ("claude-opus-4", 5.00, 25.00, 0.50),
-    ("claude-haiku", 1.00, 5.00, 0.10),
-    ("claude-3-5-sonnet", 3.00, 15.00, 0.30),
-    # Google - most specific first
-    ("gemini-3.1-pro-preview", 2.00, 12.00, 0.20),
-    ("gemini-3.1-flash-lite-preview", 0.25, 1.50, 0.025),
-    ("gemini-3.1-flash", 0.50, 3.00, 0.05),
-    ("gemini-3-flash", 0.50, 3.00, 0.05),
-    ("gemini-2.5-pro", 1.25, 10.00, 0.125),
-    ("gemini-2.5-flash", 0.30, 2.50, 0.03),
-    ("gemini-2.5-flash-lite", 0.10, 0.40, 0.01),
-    ("gemini-2.0-flash", 0.15, 0.60, None),
-    ("gemini-flash-lite-latest", 0.10, 0.40, 0.01),  # alias for 2.5-flash-lite
-    ("gemini-flash-lite", 0.10, 0.40, 0.01),
-    ("gemini-flash", 0.30, 2.50, 0.03),
-    ("gemini-pro", 1.25, 10.00, 0.125),
+    ("claude-sonnet-5", 3.00, 15.00, 0.30, None),
+    ("claude-sonnet-4-6", 3.00, 15.00, 0.30, None),
+    ("claude-opus-4-8", 5.00, 25.00, 0.50, None),
+    ("claude-opus-4", 5.00, 25.00, 0.50, None),
+    ("claude-haiku", 1.00, 5.00, 0.10, None),
+    ("claude-3-5-sonnet", 3.00, 15.00, 0.30, None),
+    # Google (ai.google.dev/gemini-api/docs/pricing, paid tier, 2026-10-09).
+    # Output includes thinking. 3.8, 3.7 and 3.6 Flash launched at half price
+    # through 2026.
+    ("gemini-3.8-flash", 1.50, 7.50, 0.15, date(2027, 1, 1)),
+    ("gemini-3.8-flash", 0.75, 3.75, 0.075, None),
+    ("gemini-3.7-flash", 1.50, 7.50, 0.15, date(2027, 1, 1)),
+    ("gemini-3.7-flash", 0.75, 3.75, 0.075, None),
+    ("gemini-3.6-flash", 1.50, 7.50, 0.15, date(2027, 1, 1)),
+    ("gemini-3.6-flash", 0.75, 3.75, 0.075, None),
+    ("gemini-3.5-flash-lite", 0.30, 2.50, 0.03, None),
+    ("gemini-3.5-flash", 1.50, 9.00, 0.15, None),
+    # Prompts up to 200k tokens; above that $4.00 / $18.00 / $0.40.
+    ("gemini-3.1-pro-preview", 2.00, 12.00, 0.20, None),
+    ("gemini-3.1-flash-lite", 0.25, 1.50, 0.025, None),
+    ("gemini-3.1-flash", 0.50, 3.00, 0.05, None),
+    ("gemini-3-flash", 0.50, 3.00, 0.05, None),
+    ("gemini-2.5-pro", 1.25, 10.00, 0.125, None),
+    ("gemini-2.5-flash-lite", 0.10, 0.40, 0.01, None),
+    ("gemini-2.5-flash", 0.30, 2.50, 0.03, None),
+    ("gemini-2.0-flash", 0.15, 0.60, None, None),
     # Inception (docs.inceptionlabs.ai/get-started/models)
-    ("mercury-2", 0.25, 0.75, 0.025),
-    ("mercury-edit-2", 0.25, 0.75, 0.025),
-    ("mercury", 0.25, 0.75, 0.025),
+    ("mercury-2", 0.25, 0.75, 0.025, None),
+    ("mercury-edit-2", 0.25, 0.75, 0.025, None),
+    ("mercury", 0.25, 0.75, 0.025, None),
 ]
 
 
-def _get_pricing(model: str) -> Optional[Tuple[float, float, Optional[float]]]:
-    """Return (input_per_1m, output_per_1m, cached_per_1m) for model or None."""
+def _get_pricing(
+    model: str, on: Optional[date] = None
+) -> Optional[Tuple[float, float, Optional[float]]]:
+    """(input_per_1m, output_per_1m, cached_per_1m) for ``model`` on day ``on``, or None.
+
+    ``on`` defaults to today in UTC.
+    """
     m = (model or "").lower()
-    for prefix, inp, out, cached in _MODEL_PRICING:
-        if m.startswith(prefix):
+    day = on or datetime.now(timezone.utc).date()
+    for prefix, inp, out, cached, since in _MODEL_PRICING:
+        if m.startswith(prefix) and (since is None or since <= day):
             return (inp, out, cached)
     return None
 
 
-def estimate_cost(usage: TokenUsage, model: str) -> Optional[float]:
+def estimate_cost(
+    usage: TokenUsage, model: str, *, on: Optional[date] = None
+) -> Optional[float]:
     """
     Estimate cost in USD from token usage.
 
     Args:
         usage: TokenUsage from AskResult
-        model: Model name (e.g. gpt-5-nano, gemini-3.1-pro-preview)
+        model: Model name (e.g. gpt-5-nano, gemini-3.1-pro-preview). Not an
+            alias: price the model that served the call, ``usage.served_model``.
+        on: The day the call was billed, for a price that changes on a date.
+            Defaults to today in UTC.
 
     Returns:
         Estimated cost in USD, or None if model pricing unknown.
@@ -72,7 +94,7 @@ def estimate_cost(usage: TokenUsage, model: str) -> Optional[float]:
     Anthropic prompt-cache writes (``cache_creation_tokens``) are billed at 125% of
     the model's input rate when present.
     """
-    pricing = _get_pricing(model)
+    pricing = _get_pricing(model, on)
     if not pricing:
         return None
 

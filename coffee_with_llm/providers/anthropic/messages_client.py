@@ -28,6 +28,7 @@ from ...types import (
     TokenUsage,
 )
 from .._reasoning import normalize_effort, thinking_budget_tokens
+from .._served import served_model
 from .._stop import stop_from
 from ..tool_utils import (
     extract_error_code,
@@ -265,6 +266,7 @@ def _token_usage_from_totals(
     total_output: int,
     total_cached: int,
     total_cache_creation: int = 0,
+    served: Optional[str] = None,
 ) -> TokenUsage:
     return TokenUsage(
         input_tokens=total_input,
@@ -272,6 +274,7 @@ def _token_usage_from_totals(
         total_tokens=total_input + total_output,
         cached_tokens=total_cached if total_cached else None,
         cache_creation_tokens=total_cache_creation if total_cache_creation else None,
+        served_model=served,
     )
 
 
@@ -773,7 +776,11 @@ class AnthropicMessagesClient:
         return (
             final_text,
             _token_usage_from_totals(
-                total_input, total_output, total_cached, total_cache_creation
+                total_input,
+                total_output,
+                total_cached,
+                total_cache_creation,
+                served_model(getattr(last_resp, "model", None)),
             ),
             stop,
         )
@@ -830,10 +837,12 @@ class AnthropicMessagesClient:
         effective_steps = 0
         consecutive_reasoning_only = 0
         pending_resp: Optional[Any] = None
+        served: Optional[str] = None
 
         def apply_usage_from_message(message: Any) -> None:
             """Accumulate Anthropic message.usage into totals and usage_sink."""
-            nonlocal total_input, total_output, total_cached, total_cache_creation
+            nonlocal total_input, total_output, total_cached, total_cache_creation, served
+            served = served_model(getattr(message, "model", None)) or served
             usage = getattr(message, "usage", None)
             if usage is None:
                 return
@@ -857,6 +866,7 @@ class AnthropicMessagesClient:
                         total_output,
                         total_cached,
                         total_cache_creation,
+                        served,
                     )
                 )
 
@@ -1030,7 +1040,7 @@ class AnthropicMessagesClient:
             if stop is not None:
                 yield stop
             yield _token_usage_from_totals(
-                total_input, total_output, total_cached, total_cache_creation
+                total_input, total_output, total_cached, total_cache_creation, served
             )
         except Exception as e:
             if is_rate_limit_error(e):
