@@ -346,7 +346,9 @@ print(result.usage.to_dict())
 
 **Gemini:** Streaming with custom tools uses function calling only (no Google Search grounding in the same streaming request).
 
-**Usage and cost:** `result.usage` (including `cost_usd`) is set when the stream finishes normally. If you stop early (`break`), call `await result.aclose()` so usage can be filled from the best-effort `StreamUsageSink` when the provider reported partial usage.
+**Usage and cost:** `result.usage` (including `cost_usd`) is set when the stream finishes normally. If you stop early (`break`), call `await result.aclose()` so usage can be filled from the best-effort `StreamUsageSink` when the provider reported partial usage. A Gemini stream stopped early is closed, not read to its end, so its usage is the running total of the chunks received.
+
+**Usage so far:** `result.usage_so_far` is the usage the chunks received so far carried, priced like `usage`, and `None` while no chunk has carried any. Reading it never touches the stream, so it is safe in a cancel handler; once the stream has ended it equals `result.usage`.
 
 ### Why it stopped
 

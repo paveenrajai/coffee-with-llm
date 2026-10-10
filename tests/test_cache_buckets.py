@@ -157,11 +157,23 @@ async def test_a_gemini_stream_leaves_the_cache_out_of_input() -> None:
     _assert_the_gemini_board(stream.usage)
 
 
+async def _gemini_stream_totalled_as_it_goes(**_kwargs: Any) -> AsyncIterator[Any]:
+    """Gemini repeating its running total on every chunk."""
+
+    async def gen() -> AsyncIterator[Any]:
+        yield _gemini_chunk("Part one", last=True)
+        yield _gemini_chunk(" and two", last=True)
+
+    return gen()
+
+
 @pytest.mark.asyncio
 async def test_a_gemini_stream_closed_early_leaves_the_cache_out_of_input() -> None:
-    """Usage then comes from the sink, filled while the rest is drained."""
+    """Usage then comes from the sink: the running total of the chunks read."""
     with patch("coffee_with_llm.providers.google.text_client.genai.Client") as mock_genai:
-        mock_genai.return_value.aio.models.generate_content_stream = _gemini_stream
+        mock_genai.return_value.aio.models.generate_content_stream = (
+            _gemini_stream_totalled_as_it_goes
+        )
         llm = AskLLM(model="google/gemini-3.8-flash", config=_config(), google_explicit_cache=False)
         stream = await llm.ask(prompt="Draw the board", stream=True)
         assert isinstance(stream, StreamResult)
