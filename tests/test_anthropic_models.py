@@ -8,6 +8,7 @@ from coffee_with_llm.providers.anthropic.models import (
     anthropic_thinking_always_on,
     anthropic_thinking_can_disable,
     anthropic_thinking_defaults_on,
+    anthropic_thinking_off,
     normalize_anthropic_model_id,
 )
 
@@ -64,6 +65,30 @@ class TestThinkingDefaults:
 
     def test_opus_4_6_no_default(self) -> None:
         assert not anthropic_thinking_defaults_on("claude-opus-4-6")
+
+    @pytest.mark.parametrize(
+        "model", ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    )
+    def test_generation_5_models_are_adaptive_and_think_by_default(self, model: str) -> None:
+        assert anthropic_supports_adaptive_thinking(model)
+        assert anthropic_thinking_defaults_on(model)
+        assert anthropic_rejects_sampling_params(model)
+
+    def test_opus_5_5_cannot_turn_thinking_off(self) -> None:
+        assert not anthropic_thinking_can_disable("claude-opus-5-5")
+        assert anthropic_thinking_off("claude-opus-5-5") is None
+        assert not anthropic_thinking_always_on("claude-opus-5-5")
+
+    def test_sonnet_5_5_turns_thinking_off_between_tools(self) -> None:
+        assert anthropic_thinking_off("claude-sonnet-5-5") == {"type": "between_tools"}
+
+    @pytest.mark.parametrize("model", ["claude-opus-5", "claude-haiku-5-5", "claude-sonnet-5"])
+    def test_disabled_turns_thinking_off(self, model: str) -> None:
+        assert anthropic_thinking_off(model) == {"type": "disabled"}
+
+    def test_haiku_4_5_is_not_generation_5(self) -> None:
+        assert not anthropic_supports_adaptive_thinking("claude-haiku-4-5")
+        assert not anthropic_thinking_defaults_on("claude-haiku-4-5")
 
 
 class TestSamplingRestrictions:

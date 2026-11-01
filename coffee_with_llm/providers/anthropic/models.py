@@ -13,9 +13,9 @@ from typing import Final
 # Opus/Sonnet 4.x minor version (e.g. claude-opus-4-8 → 8).
 _OPUS_SONNET_4_MINOR_RE = re.compile(r"(?:opus|sonnet)-4-(\d+)", re.IGNORECASE)
 
-# Generation-5 families and short aliases (sonnet-5, claude-sonnet-5, …).
+# Generation-5 families and short aliases (sonnet-5, claude-opus-5-5, …).
 _GEN5_MODEL_RE = re.compile(
-    r"(?:claude-)?(?:sonnet|fable|mythos)-5(?:$|[-_])",
+    r"(?:claude-)?(?:sonnet|fable|mythos|opus|haiku)-5(?:$|[-_])",
     re.IGNORECASE,
 )
 
@@ -73,7 +73,11 @@ def anthropic_thinking_always_on(model: str) -> bool:
 
 
 def anthropic_thinking_defaults_on(model: str) -> bool:
-    """Omitting ``thinking`` leaves adaptive thinking enabled on the API."""
+    """Omitting ``thinking`` leaves adaptive thinking enabled on the API.
+
+    Every generation-5 model (Opus 5 and 5.5, Sonnet 5 and 5.5, Haiku 5.5,
+    Fable, Mythos) and Mythos Preview; Opus 4.8 and 4.7 run without it.
+    """
     key = _model_key(model)
     if not key:
         return False
@@ -81,18 +85,29 @@ def anthropic_thinking_defaults_on(model: str) -> bool:
         return True
     if "mythos-preview" in key:
         return True
-    if _GEN5_MODEL_RE.search(key) and "sonnet" in key:
-        return True
-    return False
+    return bool(_GEN5_MODEL_RE.search(key))
 
 
 def anthropic_thinking_can_disable(model: str) -> bool:
-    """Whether ``thinking: {type: disabled}`` is supported."""
+    """Whether ``thinking: {type: disabled}`` is supported.
+
+    Not on Fable 5, Mythos and Mythos Preview, whose thinking is always on;
+    not on Opus 5.5, where effort is the only control; and not on Sonnet 5.5,
+    which turns thinking off with ``between_tools`` instead.
+    """
     if anthropic_thinking_always_on(model):
         return False
-    if "mythos-preview" in _model_key(model):
-        return False
-    return True
+    key = _model_key(model)
+    return not any(name in key for name in ("mythos-preview", "opus-5-5", "sonnet-5-5"))
+
+
+def anthropic_thinking_off(model: str) -> dict[str, str] | None:
+    """The ``thinking`` value that turns thinking off, or None where it cannot be."""
+    if "sonnet-5-5" in _model_key(model):
+        return {"type": "between_tools"}
+    if anthropic_thinking_can_disable(model):
+        return {"type": "disabled"}
+    return None
 
 
 def anthropic_rejects_sampling_params(model: str) -> bool:

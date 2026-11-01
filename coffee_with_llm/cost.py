@@ -26,8 +26,20 @@ _MODEL_PRICING: list[Tuple[str, float, float, Optional[float], Optional[date]]] 
     ("gpt-5-nano", 0.05, 0.40, None, None),
     ("gpt-4o-mini", 0.15, 0.60, None, None),
     ("gpt-4o", 2.50, 10.00, 1.25, None),
-    # Anthropic (cached_per_1m ≈ 10% of input per anthropic.com/pricing)
-    ("claude-sonnet-5", 3.00, 15.00, 0.30, None),
+    # Anthropic (platform.claude.com/docs/en/about-claude/pricing, 2026-11-01).
+    # Cache reads are 10% of input, except 5% on Opus 5.5 and Sonnet 5.5 and
+    # 2.5% on Fable 5.1 and Mythos 5.1. Sonnet 5's launch price of $2 / $10
+    # stayed, and the $3 / $15 it was to rise to on 2026-09-01 never came.
+    ("claude-fable-5-1", 10.00, 50.00, 0.25, None),
+    ("claude-fable-5", 10.00, 50.00, 1.00, None),
+    ("claude-mythos-5-1", 10.00, 50.00, 0.25, None),
+    ("claude-mythos-5", 10.00, 50.00, 1.00, None),
+    ("claude-opus-5-5", 4.00, 20.00, 0.20, None),
+    ("claude-opus-5", 5.00, 25.00, 0.50, None),
+    ("claude-sonnet-5-5", 2.00, 10.00, 0.10, None),
+    ("claude-sonnet-5", 2.00, 10.00, 0.20, None),
+    # Prompts up to 100k tokens; above that $0.50 / $2.50 / $0.05.
+    ("claude-haiku-5-5", 0.10, 0.50, 0.01, None),
     ("claude-sonnet-4-6", 3.00, 15.00, 0.30, None),
     ("claude-opus-4-8", 5.00, 25.00, 0.50, None),
     ("claude-opus-4", 5.00, 25.00, 0.50, None),

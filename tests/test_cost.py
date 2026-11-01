@@ -82,3 +82,34 @@ class TestEstimateCost:
         # 500k uncached @ 0.25 + 500k cached @ 0.025
         expected = (500_000 / 1_000_000) * 0.25 + (500_000 / 1_000_000) * 0.025
         assert cost == round(expected, 6)
+
+
+class TestClaudePrices:
+    """Prices from platform.claude.com/docs/en/about-claude/pricing, 2026-11-01."""
+
+    def test_opus_5_5_has_its_own_price(self):
+        # 1M uncached in, 1M cached read, 1M out: $4 + $0.20 + $20.
+        usage = TokenUsage(1_000_000, 1_000_000, 2_000_000, 1_000_000)
+        assert estimate_cost(usage, "claude-opus-5-5") == 24.2
+
+    def test_opus_5_is_not_priced_as_opus_5_5(self):
+        usage = TokenUsage(1_000_000, 1_000_000, 2_000_000, None)
+        assert estimate_cost(usage, "claude-opus-5") == 30.0
+
+    def test_sonnet_5_kept_its_launch_price(self):
+        usage = TokenUsage(1_000_000, 1_000_000, 2_000_000, None)
+        assert estimate_cost(usage, "claude-sonnet-5") == 12.0
+
+    def test_sonnet_5_5_cache_reads_are_5_percent(self):
+        usage = TokenUsage(0, 0, 0, 1_000_000)
+        assert estimate_cost(usage, "claude-sonnet-5-5") == 0.1
+
+    def test_haiku_5_5_is_not_priced_as_haiku_4_5(self):
+        usage = TokenUsage(1_000_000, 1_000_000, 2_000_000, None)
+        assert estimate_cost(usage, "claude-haiku-5-5") == 0.6
+        assert estimate_cost(usage, "claude-haiku-4-5") == 6.0
+
+    def test_fable_5_1_cache_reads_are_2_5_percent(self):
+        usage = TokenUsage(0, 0, 0, 1_000_000)
+        assert estimate_cost(usage, "claude-fable-5-1") == 0.25
+        assert estimate_cost(usage, "claude-fable-5") == 1.0
