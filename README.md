@@ -403,6 +403,26 @@ payload = result.usage.to_dict()
 
 Rate limits trigger retry before the first chunk.
 
+### Tracing (OpenTelemetry)
+
+With `coffee_with_llm[otel]` installed and a tracer provider set up, each call
+is one span, opened in the caller's context: a call made inside a traced
+request joins that request's trace. A stream's span ends with the stream.
+
+The span follows the [GenAI conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/):
+`gen_ai.provider.name` (`anthropic`, `gcp.gemini`, `openai`, `inception`),
+`gen_ai.request.model`, `gen_ai.response.model` (`served_model`),
+`gen_ai.usage.input_tokens` (which, as the conventions count it, includes the
+cache), `gen_ai.usage.cache_read.input_tokens`,
+`gen_ai.usage.output_tokens` and `gen_ai.response.finish_reasons`, plus
+`coffee_with_llm.cost_usd`. A failed call is an error span.
+
+Prompts and answers stay off the span unless
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`; then they are
+`gen_ai.input.messages` and `gen_ai.output.messages`.
+
+Without `opentelemetry-api`, calls run untraced.
+
 ## Supported Models
 
 ### OpenAI
@@ -491,6 +511,7 @@ Loaded from `.env` (see `.env.example`) or the process environment:
 - `ANTHROPIC_API_KEY`: Anthropic API key (required for Claude models)
 - `GOOGLE_API_KEY`: Google API key (required for Google models)
 - `INCEPTION_API_KEY`: Inception API key (required for Mercury models)
+- `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`: `true` records prompts and answers on call spans (see Tracing)
 
 Provider options (`google_explicit_cache`, `google_inline_citations`, `anthropic_prompt_cache`) are passed as constructor params to `AskLLM`; see docstring.
 

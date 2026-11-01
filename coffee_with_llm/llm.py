@@ -13,8 +13,14 @@ from .exceptions import APIError, ConfigurationError, RateLimitError, Validation
 from .providers.google.api_mode import DEFAULT_GOOGLE_API_MODE, GoogleApiMode
 from .providers.google.interactions_client import GoogleInteractionsClient
 from .providers.google.text_client import GoogleTextClient
-from .providers.registry import get_google_interactions_client, get_provider, split_provider_model
+from .providers.registry import (
+    get_google_interactions_client,
+    get_provider,
+    provider_name,
+    split_provider_model,
+)
 from .rate_limit import is_rate_limit_error, is_transient_error, with_retry
+from .tracing import CallSpan, start_call
 from .types import AskResult, Stop, StreamResult, StreamUsageSink, TokenUsage, UrlRetrieval
 
 logger = logging.getLogger(__name__)
@@ -109,6 +115,7 @@ class AskLLM:
 
         self._model = api_model
         self._model_str = model_str
+        self._provider = provider_name(model_str)
         self._min_delay = min_delay_between_calls
         self._max_retries = max_retries
         self._last_call_time: Optional[float] = None
@@ -224,8 +231,18 @@ class AskLLM:
         # Rate limiting: wait if needed before making API call
         await self._wait_if_needed()
 
+        call = start_call(
+            provider=self._provider,
+            model=self._model,
+            prompt=prompt,
+            system_instruct=system_instruct,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
         if stream:
             return self._ask_stream(
+                call=call,
                 prompt=prompt,
                 messages=messages,
                 max_tokens=max_tokens,
@@ -283,12 +300,13 @@ class AskLLM:
             )
 
         try:
-            return await with_retry(
+            result = await with_retry(
                 _generate,
                 max_retries=self._max_retries,
                 is_retryable=_retryable(tools_schema, execute_tool_cb),
             )
         except Exception as e:
+            call.fail(e)
             if isinstance(e, (ValidationError, ConfigurationError, RateLimitError)):
                 raise
             if is_rate_limit_error(e):
@@ -302,6 +320,8 @@ class AskLLM:
                 ) from e
             logger.error(f"API call failed for model '{self._model}': {e}")
             raise APIError(f"Failed to generate response: {e}") from e
+        call.finish(usage=result.usage, stop=result.stop, text=result.text)
+        return result
 
     def _get_interactions_client(self) -> GoogleInteractionsClient:
         if self._interactions_client is None:
@@ -338,6 +358,14 @@ class AskLLM:
 
         await self._wait_if_needed()
         client = self._get_interactions_client()
+        call = start_call(
+            provider=self._provider,
+            model=self._model,
+            prompt=prompt,
+            system_instruct=system_instruct,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
 
         async def _create() -> AskResult:
             text, usage, interaction_id, stop = await client.create_interaction(
@@ -361,12 +389,13 @@ class AskLLM:
             )
 
         try:
-            return await with_retry(
+            result = await with_retry(
                 _create,
                 max_retries=self._max_retries,
                 is_retryable=_retryable(tools_schema, execute_tool_cb),
             )
         except Exception as e:
+            call.fail(e)
             if isinstance(e, (ValidationError, ConfigurationError, RateLimitError)):
                 raise
             if is_rate_limit_error(e):
@@ -374,10 +403,13 @@ class AskLLM:
                     f"Rate limit exceeded after {self._max_retries} retries: {e}"
                 ) from e
             raise APIError(f"Failed to create interaction: {e}") from e
+        call.finish(usage=result.usage, stop=result.stop, text=result.text)
+        return result
 
     def _ask_stream(
         self,
         *,
+        call: CallSpan,
         prompt: str,
         messages: Optional[List[Dict[str, Any]]],
         max_tokens: Optional[int],
@@ -429,6 +461,7 @@ class AskLLM:
             usage_callback=lambda u: self._usage_with_cost(u),
             max_retries=self._max_retries,
             usage_sink=usage_sink,
+            call=call,
         )
 
     def _usage_with_cost(self, usage: TokenUsage) -> TokenUsage:

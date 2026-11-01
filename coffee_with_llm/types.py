@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Dict, Mapping, Optional, Tuple, Union, cast
 
 from .rate_limit import retry_stream
+from .tracing import CallSpan
 
 
 @dataclass(frozen=True)
@@ -302,6 +303,9 @@ class StreamResult:
     this is how a caller tells them apart.
 
     Must be iterated via ``async for`` (``__aiter__`` before ``__anext__``).
+
+    ``call`` is the call's span (:mod:`coffee_with_llm.tracing`): it ends when
+    the stream does, at its end, on an early close or on an error.
     """
 
     def __init__(
@@ -310,6 +314,7 @@ class StreamResult:
         usage_callback: Optional[Callable[[TokenUsage], TokenUsage]] = None,
         max_retries: int = 3,
         usage_sink: Optional[StreamUsageSink] = None,
+        call: Optional[CallSpan] = None,
     ) -> None:
         self._stream_factory = stream_factory
         self._usage_callback = usage_callback
@@ -319,6 +324,9 @@ class StreamResult:
         self._stop: Optional[Stop] = None
         self._iter: Optional[AsyncIterator[object]] = None
         self._closed: bool = False
+        self._call = call or CallSpan()
+        #: The text so far, kept only when the span records it.
+        self._text: list[str] = []
 
     def __aiter__(self) -> StreamResult:
         self._iter = cast(
@@ -336,17 +344,35 @@ class StreamResult:
             raise RuntimeError(
                 "StreamResult must be iterated via async for; __aiter__ was not called"
             )
-        item = _normalize_stream_item(await self._iter.__anext__())
-        # A provider says why it stopped just before its usage. It is kept
-        # here rather than passed on, so a consumer that knows only the
-        # events it asked for never meets one it does not.
-        while isinstance(item, Stop):
-            self._stop = item
+        try:
             item = _normalize_stream_item(await self._iter.__anext__())
+            # A provider says why it stopped just before its usage. It is kept
+            # here rather than passed on, so a consumer that knows only the
+            # events it asked for never meets one it does not.
+            while isinstance(item, Stop):
+                self._stop = item
+                item = _normalize_stream_item(await self._iter.__anext__())
+        except StopAsyncIteration:
+            self._finish_call()
+            raise
+        except BaseException as exc:
+            self._call.fail(exc)
+            raise
         if isinstance(item, TokenUsage):
             self._apply_usage(item)
+            self._finish_call()
             raise StopAsyncIteration
+        if self._call.captures and isinstance(item, StreamTextDelta):
+            self._text.append(item.text)
         return cast(StreamEvent, item)
+
+    def _finish_call(self) -> None:
+        self._finalize_usage_if_needed()
+        self._call.finish(
+            usage=self._usage,
+            stop=self._stop,
+            text="".join(self._text) if self._call.captures else None,
+        )
 
     async def aclose(self) -> None:
         """Close the underlying stream and populate ``usage`` if iteration stopped early."""
@@ -359,7 +385,7 @@ class StreamResult:
             except Exception:
                 pass
         self._iter = None
-        self._finalize_usage_if_needed()
+        self._finish_call()
 
     def _apply_usage(self, usage: TokenUsage) -> None:
         self._usage = self._priced(usage)

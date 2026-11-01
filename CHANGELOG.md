@@ -2,6 +2,17 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.12.0] - 2026-11-01
+
+### Added
+
+- **A span per model call, when OpenTelemetry is set up.** `ask`, a stream and `ask_interaction` each open a span in the caller's context, so a call made inside a traced request joins that request's trace. It follows the GenAI conventions: `gen_ai.provider.name`, the model asked for and the model that answered, input, output and cache-read tokens, and why it stopped, with the cost as `coffee_with_llm.cost_usd`. A stream's span ends with the stream: at its end, on an early close, or on an error. Retries are inside the one span. Install with `coffee_with_llm[otel]`; without `opentelemetry-api` a call runs untraced, as before.
+- **Prompts and answers on the span only when asked for**, with `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`, as the conventions advise: a prompt holds whatever a person typed.
+
+### Changed
+
+- **A stream that ends without a final usage has its usage once iteration ends**, from the usage it received, rather than only after `aclose`, as `StreamResult` already documented.
+
 ## [0.11.0] - 2026-10-09
 
 ### Added
