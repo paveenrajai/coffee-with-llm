@@ -65,5 +65,5 @@ class TestTokenUsageHelpers:
             cache_creation_tokens=40_000,
         )
         cost = estimate_cost(usage, "claude-sonnet-5")
-        assert cost is not None
-        assert cost > 0.25
+        # 40,000 written at $2.50 (125% of $2) + 8,158 out at $10 + 2 in at $2.
+        assert cost == 0.181584

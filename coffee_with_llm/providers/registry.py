@@ -62,6 +62,22 @@ def _route_is_inception(route_key: str) -> bool:
     return route_key in ("inception",) or route_key.startswith(("mercury", "inception"))
 
 
+def provider_name(model: str) -> str:
+    """The provider ``get_provider`` routes a model to, by its OpenTelemetry GenAI name.
+
+    https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/#gen-ai-provider-name;
+    Inception has no name there and goes by its own.
+    """
+    _, route_key = split_provider_model(model)
+    if _route_is_anthropic(route_key):
+        return "anthropic"
+    if _route_is_google(route_key):
+        return "gcp.gemini"
+    if _route_is_inception(route_key):
+        return "inception"
+    return "openai"
+
+
 def get_google_interactions_client(
     model: str,
     config: "Config",

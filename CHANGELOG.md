@@ -2,6 +2,23 @@
 
 All notable changes to `coffee_with_llm` are documented here.
 
+## [0.12.0] - 2026-11-01
+
+### Added
+
+- **A span per model call, when OpenTelemetry is set up.** `ask`, a stream and `ask_interaction` each open a span in the caller's context, so a call made inside a traced request joins that request's trace. It follows the GenAI conventions: `gen_ai.provider.name`, the model asked for and the model that answered, input, output and cache-read tokens, and why it stopped, with the cost as `coffee_with_llm.cost_usd`. A stream's span ends with the stream: at its end, on an early close, or on an error. Retries are inside the one span. Install with `coffee_with_llm[otel]`; without `opentelemetry-api` a call runs untraced, as before.
+- **Prompts and answers on the span only when asked for**, with `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`, as the conventions advise: a prompt holds whatever a person typed.
+
+### Changed
+
+- **A stream that ends without a final usage has its usage once iteration ends**, from the usage it received, rather than only after `aclose`, as `StreamResult` already documented.
+
+### Fixed
+
+- **Opus 5.5, Opus 5 and Haiku 5.5 are generation-5 models.** The check matched only Sonnet, Fable and Mythos, so a `reasoning_effort` on Opus 5.5 was sent as `thinking.budget_tokens`, which it rejects with a 400, and a `temperature` reached it too. Effort is now adaptive thinking with `output_config.effort`, and the sampling parameters are dropped, as on the other generation-5 models.
+- **A call with no `reasoning_effort` no longer sends a thinking setting the model rejects.** Sonnet 5.5 rejects `disabled` and turns thinking off with `between_tools`, which it now gets. Opus 5.5 cannot turn thinking off at all, so it gets no thinking setting and thinks at its own default, `medium`. Opus 5 and Haiku 5.5 get `disabled`, which they accept at their default effort.
+- **Prices for the current Claude models** (platform.claude.com pricing, 2026-11-01): Opus 5.5 ($4 / $20, cache reads $0.20), Opus 5, Sonnet 5.5 (cache reads $0.10), Haiku 5.5 (prompts up to 100k tokens), Fable 5.1, Fable 5 and Mythos. Opus 5.5 had no price and Haiku 5.5 was priced as Haiku 4.5. **Sonnet 5 is $2 / $10**, its launch price, which became its standard price; it was priced at $3 / $15.
+
 ## [0.11.0] - 2026-10-09
 
 ### Added

@@ -40,8 +40,9 @@ from .models import (
     adaptive_min_max_tokens,
     anthropic_rejects_sampling_params,
     anthropic_supports_adaptive_thinking,
-    anthropic_thinking_can_disable,
+    anthropic_thinking_always_on,
     anthropic_thinking_defaults_on,
+    anthropic_thinking_off,
     normalize_anthropic_model_id,
 )
 
@@ -111,9 +112,13 @@ def _apply_thinking(params: Dict[str, Any], reasoning_effort: Optional[str]) -> 
       * Older models → manual ``thinking.type: enabled`` + ``budget_tokens``.
 
     No effort requested:
-      * Models that default to thinking on (Sonnet 5) → ``thinking.type: disabled``.
+      * Models that default to thinking on and can turn it off → it is turned off:
+        ``thinking.type: disabled`` (Opus 5, Sonnet 5, Haiku 5.5), or
+        ``between_tools`` on Sonnet 5.5, which rejects ``disabled``.
       * Models with always-on thinking (Fable/Mythos 5, Mythos Preview) → adaptive at
         ``low`` effort so ``max_tokens`` is not consumed by high-default reasoning.
+      * Opus 5.5, whose thinking cannot be turned off → omit ``thinking``: it thinks
+        at its own default effort, ``medium``.
       * All other models → omit ``thinking`` (thinking off).
 
     Manual-mode constraints (legacy only):
@@ -141,15 +146,20 @@ def _apply_thinking(params: Dict[str, Any], reasoning_effort: Optional[str]) -> 
                 params["max_tokens"] = required
         return
 
-    if anthropic_thinking_can_disable(model) and anthropic_thinking_defaults_on(model):
-        params["thinking"] = {"type": "disabled"}
+    if not anthropic_thinking_defaults_on(model):
+        return
+
+    off = anthropic_thinking_off(model)
+    if off is not None:
+        params["thinking"] = off
         logger.debug(
-            "[ANTHROPIC] thinking disabled for %s (reasoning_effort unset)",
+            "[ANTHROPIC] thinking %s for %s (reasoning_effort unset)",
+            off["type"],
             model,
         )
         return
 
-    if anthropic_thinking_defaults_on(model):
+    if anthropic_thinking_always_on(model) or "mythos-preview" in model.lower():
         _set_adaptive_thinking(params, "low")
         logger.debug(
             "[ANTHROPIC] thinking minimized (effort=low) for %s (always-on model)",

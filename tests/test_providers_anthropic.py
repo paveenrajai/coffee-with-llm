@@ -294,6 +294,37 @@ class TestApplyThinking:
         assert params["thinking"] == {"type": "adaptive"}
         assert params["output_config"] == {"effort": "low"}
 
+    def test_opus_5_5_effort_is_adaptive_never_a_budget(self):
+        """Opus 5.5 rejects ``budget_tokens`` with a 400: effort goes in ``output_config``."""
+        params = {"model": "claude-opus-5-5", "max_tokens": 4096}
+        _apply_thinking(params, "high")
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "high"}
+
+    def test_opus_5_5_without_effort_thinks_at_its_own_default(self):
+        """Its thinking cannot be turned off, and ``disabled`` is a 400."""
+        params = {"model": "claude-opus-5-5", "max_tokens": 4096}
+        _apply_thinking(params, None)
+        assert "thinking" not in params
+        assert "output_config" not in params
+
+    def test_sonnet_5_5_turns_thinking_off_between_tools(self):
+        """Sonnet 5.5 rejects ``disabled``; ``between_tools`` is its off switch."""
+        params = {"model": "claude-sonnet-5-5", "max_tokens": 4096}
+        _apply_thinking(params, None)
+        assert params["thinking"] == {"type": "between_tools"}
+
+    def test_haiku_5_5_disables_thinking_when_effort_missing(self):
+        params = {"model": "claude-haiku-5-5", "max_tokens": 4096}
+        _apply_thinking(params, None)
+        assert params["thinking"] == {"type": "disabled"}
+
+    def test_haiku_5_5_effort_is_adaptive(self):
+        params = {"model": "claude-haiku-5-5", "max_tokens": 4096}
+        _apply_thinking(params, "low")
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "low"}
+
     def test_no_op_when_effort_unknown(self):
         params = {"max_tokens": 4096, "top_p": 0.9}
         snapshot = dict(params)
